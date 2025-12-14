@@ -65,6 +65,12 @@ class Database:
             )
         ''')
         
+        # MIGRACIÓN SEGURA: Intentar añadir columna telefono si no existe
+        try:
+            cursor.execute('ALTER TABLE citas ADD COLUMN telefono TEXT')
+        except sqlite3.OperationalError:
+            pass # La columna ya existe, todo bien
+
         # Tabla de conversaciones (historial por chat)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS conversaciones (
@@ -161,9 +167,9 @@ UBICACIÓN:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO citas (fecha, hora, cliente_nombre, servicio, estado)
-            VALUES (?, ?, ?, ?, 'Confirmado')
-        ''', (fecha, hora, cliente_nombre, servicio))
+            INSERT INTO citas (fecha, hora, cliente_nombre, telefono, servicio, estado)
+            VALUES (?, ?, ?, ?, ?, 'Confirmado')
+        ''', (fecha, hora, cliente_nombre, telefono, servicio))
         conn.commit()
         cita_id = cursor.lastrowid
         conn.close()

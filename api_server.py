@@ -24,23 +24,26 @@ GROQ_API_KEYS = [
 GROQ_API_KEYS = [k for k in GROQ_API_KEYS if k]
 current_key_index = 0
 
-# === MEMORIA DE CONVERSACIONES ===
-conversaciones = {}
+# === MEMORIA DE ESTADO (CONVERSACIÓN + INTENCIÓN) ===
+# Estructura: {'telefono': {'history': [], 'state': {'nombre': None, 'fecha': None, 'hora': None}}}
+sesiones = {}
 
-def obtener_historial(cliente):
-    if cliente not in conversaciones:
-        conversaciones[cliente] = []
-    return conversaciones[cliente]
+def obtener_sesion(cliente):
+    if cliente not in sesiones:
+        sesiones[cliente] = {
+            'history': [],
+            'state': {} # Estado vacío
+        }
+    return sesiones[cliente]
 
-def agregar_al_historial(cliente, rol, mensaje):
-    if cliente not in conversaciones:
-        conversaciones[cliente] = []
-    conversaciones[cliente].append({"role": rol, "content": mensaje})
-    if len(conversaciones[cliente]) > 20:
-        conversaciones[cliente] = conversaciones[cliente][-20:]
+def actualizar_historial(cliente, rol, mensaje):
+    sesion = obtener_sesion(cliente)
+    sesion['history'].append({"role": rol, "content": mensaje})
+    if len(sesion['history']) > 20:
+        sesion['history'] = sesion['history'][-20:]
 
 # === HELPER DISPONIBILIDAD INTELIGENTE ===
-def obtener_estado_agenda(dias=3):
+def obtener_estado_agenda(dias=5):
     """Obtiene el estado de la agenda (Citas + Reglas de Negocio)"""
     ahora = datetime.datetime.utcnow() - datetime.timedelta(hours=4)
     resumen = []
@@ -69,6 +72,40 @@ def obtener_estado_agenda(dias=3):
 
     return "\n".join(resumen)
 
+# === ANALIZADOR DE INTENCIÓN (REGEX) ===
+def analizar_intencion(mensaje, estado_actual):
+    """Analiza el mensaje y extrae datos clave para mantener el estado"""
+    mensaje = mensaje.lower()
+    nuevo_estado = estado_actual.copy()
+
+    # 1. Detectar Nombre ("soy x", "me llamo x")
+    match_nombre = re.search(r'(?:soy|me llamo|mi nombre es)\s+([a-zA-ZáéíóúÁÉÍÓÚ]+)', mensaje)
+    if match_nombre:
+        nuevo_estado['nombre'] = match_nombre.group(1).title()
+
+    # 2. Detectar Fecha ("lunes", "mañana", "hoy")
+    dias_semana = ['lunes', 'martes', 'miércoles', 'miercoles', 'jueves', 'viernes', 'sábado', 'sabado', 'domingo']
+    for dia in dias_semana:
+        if dia in mensaje:
+            nuevo_estado['fecha_intencion'] = dia
+
+    if 'hoy' in mensaje:
+        nuevo_estado['fecha_intencion'] = 'HOY'
+    if 'mañana' in mensaje or 'manana' in mensaje:
+        nuevo_estado['fecha_intencion'] = 'MAÑANA'
+
+    # 3. Detectar Hora Simple ("las 5", "a las 4")
+    match_hora = re.search(r'(?:las|la)\s+(\d{1,2})', mensaje)
+    if match_hora:
+        hora = int(match_hora.group(1))
+        # Lógica Smart Time (1-6 -> PM)
+        if 1 <= hora <= 6:
+            nuevo_estado['hora_intencion'] = f"{hora + 12}:00"
+        else:
+            nuevo_estado['hora_intencion'] = f"{hora}:00"
+
+    return nuevo_estado
+
 # === BOT CON GROQ (ROTACIÓN DE KEYS) ===
 def generar_respuesta_ia(mensaje, cliente):
     global current_key_index
@@ -86,61 +123,77 @@ def generar_respuesta_ia(mensaje, cliente):
     # Configuración del negocio
     config = db.get_all_config()
     nombre_negocio = config.get('nombre_negocio', 'Barbería Z')
-    # Obtenemos las instrucciones personalizadas de la DB
     instrucciones_negocio = config.get('instrucciones', 'Horario: 9am-8pm. Corte $10.')
     
-    # Fecha actual (zona horaria -4)
+    # Contexto Temporal
     ahora = datetime.datetime.utcnow() - datetime.timedelta(hours=4)
     fecha_hoy = ahora.strftime('%Y-%m-%d')
     hora_actual = ahora.strftime('%H:%M')
     dia_semana_int = ahora.weekday()
     dia_semana = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'][dia_semana_int]
 
-    # Obtener disponibilidad real e inteligente
-    estado_agenda = obtener_estado_agenda(5) # Mirar 5 días adelante
+    # Obtener estado de la sesión y agenda
+    sesion = obtener_sesion(cliente)
+
+    # Analizar y Actualizar Estado (Memoria a Corto Plazo)
+    sesion['state'] = analizar_intencion(mensaje, sesion['state'])
+    estado_actual = sesion['state']
+
+    estado_agenda = obtener_estado_agenda(5)
+
+    # Construir "Memoria Explícita" para el Prompt
+    contexto_memoria = ""
+    if estado_actual.get('nombre'):
+        contexto_memoria += f"- NOMBRE DETECTADO: {estado_actual['nombre']}\n"
+    if estado_actual.get('fecha_intencion'):
+        contexto_memoria += f"- FECHA SOLICITADA: {estado_actual['fecha_intencion']}\n"
+    if estado_actual.get('hora_intencion'):
+        contexto_memoria += f"- HORA SOLICITADA: {estado_actual['hora_intencion']}\n"
 
     # === SISTEMA PROMPT ===
     system_prompt = f"""Eres el asistente virtual de {nombre_negocio}.
 
-FECHA Y HORA ACTUAL: {dia_semana} {fecha_hoy}, {hora_actual}
+=== CONTEXTO TEMPORAL ===
+HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
 
-ESTADO DE LA AGENDA (DISPONIBILIDAD REAL):
+=== MEMORIA DE ESTA CHARLA (LO QUE YA SABEMOS) ===
+{contexto_memoria}
+(Usa estos datos. NO preguntes lo que ya está aquí).
+
+=== ESTADO DE LA AGENDA (REALIDAD) ===
 {estado_agenda}
 
-=== INSTRUCCIONES DEL NEGOCIO (PERSONALIDAD) ===
+=== INSTRUCCIONES DEL NEGOCIO ===
 {instrucciones_negocio}
 
-=== REGLAS DE ORO (NO ROMPER) ===
-1. REVISA "ESTADO DE LA AGENDA" ARRIBA.
-   - Si dice "CERRADO", dile al cliente amablemente que no se puede y ofrece el siguiente día libre.
-   - Si el horario pedido está en la lista de "Ocupado", ofrece otro.
-2. FECHAS RELATIVAS:
-   - Si dicen "este martes", busca el martes de esta semana en base a la FECHA ACTUAL.
-   - Si dicen "próximo martes", suma 7 días.
-3. ALMUERZO: 12:00 a 13:00 siempre cerrado.
+=== REGLAS DE ORO (LÓGICA BLINDADA) ===
+1. SI ES DOMINGO HOY ({dia_semana}):
+   - Si piden "hoy", DI QUE NO. Está cerrado.
+   - Si piden "mañana" (Lunes), DI QUE SÍ (si hay lugar).
+   - NO confundas "mañana" con "hoy".
 
-=== FLUJO DE CONVERSACIÓN (MEMORIA) ===
-1. EXTRAER NOMBRE: Busca en todo el historial. Si el usuario dijo "Soy Fernando" o "Me llamo Fernando", EL NOMBRE ES FERNANDO.
-   - NUNCA uses "Nombre" o "Cliente" como placeholder.
-   - Si no encuentras el nombre, pregúntalo.
-2. MODIFICACIONES (CRÍTICO):
-   - Si ya acordaste una hora y el usuario agrega algo (ej: "y cejas también"), MANTÉN LA HORA ACORDADA.
-   - No preguntes "¿A qué hora?" de nuevo. Solo confirma el nuevo servicio en la misma hora.
-3. CONFIRMACIÓN FINAL: Solo cuando tengas Día + Hora + Servicio + Nombre, escribe:
-   [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
+2. PRECIOS Y SERVICIOS:
+   - Corte $10 | Barba $5 | Cejas $3 | Pack (Corte+Barba) $12.
+
+3. FLUJO DE CIERRE (CRÍTICO):
+   - Si el usuario dice "Sí", "Dale", "Confirmo": CONFIRMA LA CITA con los datos que ya tienes en MEMORIA.
+   - Si agrega un servicio extra (upsell), MANTÉN la hora y fecha ya acordada.
+
+4. AL CONFIRMAR:
+   - Solo escribe [CITA]... si tienes Nombre, Servicio, Fecha y Hora.
+   - Formato: [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
 
 IMPORTANTE:
-- Sé inteligente. Si es Domingo, di "Hoy domingo descansamos, crack. ¿Te anoto para mañana lunes?".
-- Si dicen "Las 5", es 17:00.
+- Si en MEMORIA dice NOMBRE DETECTADO, úsalo ("Hola Fernando").
+- Si en MEMORIA dice HORA SOLICITADA, asume que esa es la hora, no preguntes "¿a qué hora?".
 """
 
-    # Obtener historial y agregar mensaje actual
-    historial = obtener_historial(cliente)
-    agregar_al_historial(cliente, "user", mensaje)
+    # Actualizar historial
+    actualizar_historial(cliente, "user", mensaje)
     
     # Construir mensajes
     mensajes = [{"role": "system", "content": system_prompt}]
-    mensajes.extend(historial)
+    mensajes.extend(sesion['history'])
     
     # Intentar con cada API key
     for intento in range(len(GROQ_API_KEYS)):
@@ -151,20 +204,22 @@ IMPORTANTE:
             chat_completion = groq_client.chat.completions.create(
                 messages=mensajes,
                 model="llama-3.1-8b-instant",
-                max_tokens=300,
-                temperature=0.7
+                max_tokens=350,
+                temperature=0.6 # Bajamos temperatura para ser más precisos
             )
             
             respuesta = chat_completion.choices[0].message.content
             print(f"✅ GROQ[{current_key_index}] respondió: {respuesta[:80]}...")
             
             # Agregar al historial
-            agregar_al_historial(cliente, "assistant", respuesta)
+            actualizar_historial(cliente, "assistant", respuesta)
             
             # Procesar cita si existe
             if '[CITA]' in respuesta and '[/CITA]' in respuesta:
                 procesar_cita(respuesta, cliente)
                 respuesta = re.sub(r'\[CITA\].*?\[/CITA\]', '', respuesta).strip()
+                # Limpiar estado tras confirmar (Opcional, pero bueno para nueva cita)
+                sesion['state'] = {}
                 if not respuesta:
                     respuesta = "✅ ¡Listo! Tu cita ha sido agendada. ¡Te esperamos!"
             
@@ -172,7 +227,6 @@ IMPORTANTE:
             
         except Exception as e:
             print(f"⚠️ GROQ[{current_key_index}] falló: {str(e)[:80]}")
-            # Rotar a la siguiente key
             current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
     
     print("❌ Todas las API keys fallaron")
@@ -184,16 +238,20 @@ def procesar_cita(respuesta, telefono):
         if match:
             datos = match.group(1).split('|')
             if len(datos) >= 4:
-                # Normalizar hora si es necesario (ej: 4:00 -> 04:00, 16:00 -> 16:00)
+                # Normalizar hora
                 hora_raw = datos[3].strip()
-                if len(hora_raw) == 4 and ':' in hora_raw: # h:mm
+                if len(hora_raw) == 4 and ':' in hora_raw: # h:mm -> 0h:mm
                     hora_raw = "0" + hora_raw
 
+                # Normalizar fecha (Intentar arreglar si el LLM manda "Lunes" en vez de YYYY-MM-DD)
+                fecha_raw = datos[2].strip()
+                # (Aquí podríamos agregar lógica extra si el LLM falla, pero confiamos en el prompt por ahora)
+
                 db.agregar_cita(
-                    fecha=datos[2].strip(),
+                    fecha=fecha_raw,
                     hora=hora_raw,
                     cliente_nombre=datos[0].strip(),
-                    telefono=telefono,  # <-- FIX: Pasamos el teléfono
+                    telefono=telefono,
                     servicio=datos[1].strip()
                 )
                 print(f"✅ CITA GUARDADA: {datos[0]} - {datos[2]} {datos[3]}")
@@ -205,30 +263,23 @@ def procesar_cita(respuesta, telefono):
 def whatsapp_webhook():
     try:
         msg = request.values.get('Body', '').strip()
-        sender = request.values.get('From', '')  # whatsapp:+595...
+        sender = request.values.get('From', '')
         
         if not sender or not msg:
-            print("⚠️ Mensaje vacío o sin remitente")
             return '', 200
         
         print(f"📩 MENSAJE de {sender}: {msg}")
         
-        # Guardar mensaje
         cliente = sender.replace('whatsapp:', '')
         db.agregar_mensaje(cliente, msg, es_bot=False)
         
-        # Generar respuesta
         respuesta = generar_respuesta_ia(msg, cliente)
         
         if respuesta is None:
-            print("🔴 Bot apagado")
             return '', 200
         
-        # Guardar respuesta
         db.agregar_mensaje(cliente, respuesta, es_bot=True)
         
-        # Responder con TwiML (método estándar)
-        print(f"📤 ENVIANDO: {respuesta[:80]}...")
         resp = MessagingResponse()
         resp.message(respuesta)
         return str(resp), 200, {'Content-Type': 'application/xml'}
@@ -236,12 +287,8 @@ def whatsapp_webhook():
     except Exception as e:
         print(f"❌ ERROR WEBHOOK: {str(e)}")
         return '', 500
-        
-    except Exception as e:
-        print(f"❌ ERROR WEBHOOK: {str(e)}")
-        return '', 500
 
-# === RUTAS API ===
+# === RUTAS API RESTAURADAS ===
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({'status': 'online', 'message': 'Bot de Barbería activo'})
@@ -274,6 +321,7 @@ def api_citas():
             fecha=data.get('fecha'),
             hora=data.get('hora'),
             cliente_nombre=data.get('cliente_nombre', 'Cliente'),
+            telefono=data.get('telefono', ''),
             servicio=data.get('servicio', 'Corte')
         )
         return jsonify({'success': True, 'id': cita_id})

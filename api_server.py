@@ -104,6 +104,28 @@ def analizar_intencion(mensaje, estado_actual):
         else:
             nuevo_estado['hora_intencion'] = f"{hora}:00"
 
+    # 4. Detectar Servicio ("corte", "barba", "cejas")
+    servicios = []
+    if 'corte' in mensaje or 'cabello' in mensaje or 'pelo' in mensaje:
+        servicios.append('Corte')
+    if 'barba' in mensaje:
+        servicios.append('Barba')
+    if 'cejas' in mensaje:
+        servicios.append('Cejas')
+
+    if servicios:
+        # Si ya había servicios y se agregan (ej: "agrega barba"), concatenamos
+        prev_servicios = nuevo_estado.get('servicio', '')
+        # Solo actualizar si es algo nuevo o combinado
+        nuevo_str = " + ".join(servicios)
+        if prev_servicios and prev_servicios != nuevo_str:
+             if 'Corte' in prev_servicios and 'Barba' in servicios:
+                 nuevo_estado['servicio'] = 'Corte + Barba'
+             else:
+                 nuevo_estado['servicio'] = nuevo_str
+        else:
+            nuevo_estado['servicio'] = nuevo_str
+
     return nuevo_estado
 
 # === BOT CON GROQ (ROTACIÓN DE KEYS) ===
@@ -149,6 +171,8 @@ def generar_respuesta_ia(mensaje, cliente):
         contexto_memoria += f"- FECHA SOLICITADA: {estado_actual['fecha_intencion']}\n"
     if estado_actual.get('hora_intencion'):
         contexto_memoria += f"- HORA SOLICITADA: {estado_actual['hora_intencion']}\n"
+    if estado_actual.get('servicio'):
+        contexto_memoria += f"- SERVICIO DETECTADO: {estado_actual['servicio']}\n"
 
     # === SISTEMA PROMPT ===
     system_prompt = f"""Eres el asistente virtual de {nombre_negocio}.
@@ -177,7 +201,8 @@ HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
 
 3. FLUJO DE CIERRE (CRÍTICO):
    - Si el usuario dice "Sí", "Dale", "Confirmo": CONFIRMA LA CITA con los datos que ya tienes en MEMORIA.
-   - Si agrega un servicio extra (upsell), MANTÉN la hora y fecha ya acordada.
+   - Si agrega un servicio extra (upsell), MANTÉN la hora y fecha ya acordada y SOLO CONFIRMA.
+   - NO PREGUNTES MÉTODO DE PAGO. NO PREGUNTES COSAS EXTRAS.
 
 4. AL CONFIRMAR:
    - Solo escribe [CITA]... si tienes Nombre, Servicio, Fecha y Hora.
@@ -186,6 +211,7 @@ HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
 IMPORTANTE:
 - Si en MEMORIA dice NOMBRE DETECTADO, úsalo ("Hola Fernando").
 - Si en MEMORIA dice HORA SOLICITADA, asume que esa es la hora, no preguntes "¿a qué hora?".
+- TU META ES CONSEGUIR EL TAG [CITA]. NO TE DISTRAIGAS CON PAGOS.
 """
 
     # Actualizar historial
@@ -205,7 +231,7 @@ IMPORTANTE:
                 messages=mensajes,
                 model="llama-3.1-8b-instant",
                 max_tokens=350,
-                temperature=0.6 # Bajamos temperatura para ser más precisos
+                temperature=0.5 # Bajamos más la temperatura para evitar distracciones
             )
             
             respuesta = chat_completion.choices[0].message.content

@@ -39,6 +39,21 @@ def agregar_al_historial(cliente, rol, mensaje):
     if len(conversaciones[cliente]) > 20:
         conversaciones[cliente] = conversaciones[cliente][-20:]
 
+# === HELPER DISPONIBILIDAD ===
+def obtener_citas_proximos_dias(dias=3):
+    """Obtiene una lista de citas ocupadas para hoy y los próximos días"""
+    ahora = datetime.datetime.utcnow() - datetime.timedelta(hours=4)
+    resumen = []
+
+    for i in range(dias):
+        fecha = (ahora + datetime.timedelta(days=i)).strftime('%Y-%m-%d')
+        citas = db.obtener_citas_por_fecha(fecha)
+        if citas:
+            horas_ocupadas = [c['hora'][:5] for c in citas] # Solo HH:MM
+            resumen.append(f"{fecha}: {', '.join(horas_ocupadas)}")
+
+    return "\n".join(resumen) if resumen else "Ninguna (Todo disponible)"
+
 # === BOT CON GROQ (ROTACIÓN DE KEYS) ===
 def generar_respuesta_ia(mensaje, cliente):
     global current_key_index
@@ -56,7 +71,7 @@ def generar_respuesta_ia(mensaje, cliente):
     # Configuración del negocio
     config = db.get_all_config()
     nombre_negocio = config.get('nombre_negocio', 'Barbería Z')
-    instrucciones = config.get('instrucciones', 'Horario: 9am-6pm. Corte $10.')
+    instrucciones = config.get('instrucciones', 'Horario: 9am-8pm. Corte $10.')
     
     # Fecha actual (zona horaria -4)
     ahora = datetime.datetime.utcnow() - datetime.timedelta(hours=4)
@@ -64,29 +79,44 @@ def generar_respuesta_ia(mensaje, cliente):
     hora_actual = ahora.strftime('%H:%M')
     dia_semana = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'][ahora.weekday()]
     
+    # Obtener disponibilidad real
+    citas_ocupadas = obtener_citas_proximos_dias(4)
+
     system_prompt = f"""Eres el asistente virtual de {nombre_negocio}.
 
 FECHA Y HORA ACTUAL: {dia_semana} {fecha_hoy}, {hora_actual}
 
-INSTRUCCIONES DEL NEGOCIO:
-{instrucciones}
+HORARIOS OCUPADOS (NO AGENDAR EN ESTAS HORAS):
+{citas_ocupadas}
+
+HORARIO COMERCIAL:
+- Lunes a Sábado: 09:00 a 20:00 (Último turno 19:00)
+- Domingo: CERRADO
+- ALMUERZO: 12:00 a 13:00 (NO hay citas a las 12:00, reanuda a las 13:00)
+
+REGLAS DE HORARIO:
+1. Si el usuario dice "4", asume "4 PM" (16:00).
+2. Si dice "1", asume "1 PM" (13:00).
+3. NO agendar a las 12:00 (Hora de almuerzo).
+4. NO agendar los Domingos.
+5. Verifica en "HORARIOS OCUPADOS" antes de confirmar.
 
 TU TRABAJO ES AGENDAR CITAS:
 1. Si el cliente saluda, responde breve y pregunta en qué puedes ayudar
 2. Si quiere cita, pregunta su nombre
 3. Luego pregunta qué servicio (corte, barba, cejas)
 4. Luego pregunta día y hora
-5. Cuando tengas TODO, confirma la cita
+5. Cuando tengas TODO, confirma la cita.
 
-REGLAS:
-- NO saludes de nuevo si ya saludaste
-- RECUERDA lo que el cliente ya dijo
-- Sé breve (2-3 oraciones máximo)
-- Si no sabes algo, di que llamen al negocio
+IMPORTANTE:
+- NO saludes de nuevo si ya saludaste.
+- RECUERDA lo que el cliente ya dijo.
+- Sé breve (2-3 oraciones máximo).
 
-Cuando confirmes una cita, agrega al final:
-[CITA]nombre|servicio|fecha|hora[/CITA]
-Ejemplo: [CITA]Juan|Corte|2025-12-11|15:00[/CITA]"""
+CUANDO CONFIRMES UNA CITA, AGREGA AL FINAL:
+[CITA]nombre|servicio|fecha(YYYY-MM-DD)|hora(HH:MM)[/CITA]
+Ejemplo: [CITA]Juan|Corte|2025-12-11|15:00[/CITA]
+"""
 
     # Obtener historial y agregar mensaje actual
     historial = obtener_historial(cliente)
@@ -138,9 +168,14 @@ def procesar_cita(respuesta, telefono):
         if match:
             datos = match.group(1).split('|')
             if len(datos) >= 4:
+                # Normalizar hora si es necesario (ej: 4:00 -> 04:00, 16:00 -> 16:00)
+                hora_raw = datos[3].strip()
+                if len(hora_raw) == 4 and ':' in hora_raw: # h:mm
+                    hora_raw = "0" + hora_raw
+
                 db.agregar_cita(
                     fecha=datos[2].strip(),
-                    hora=datos[3].strip(),
+                    hora=hora_raw,
                     cliente_nombre=datos[0].strip(),
                     servicio=datos[1].strip()
                 )

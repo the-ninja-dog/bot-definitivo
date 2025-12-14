@@ -368,7 +368,7 @@ class _DashboardTabState extends State<DashboardTab> {
   }
 }
 
-// --- TAB 2: AGENDA (CON LÓGICA DE DESCANSO) ---
+// --- TAB 2: AGENDA MEJORADA (CALENDARIO + SLOTS) ---
 class AgendaTab extends StatefulWidget {
   final String baseUrl;
   const AgendaTab({super.key, required this.baseUrl});
@@ -379,11 +379,12 @@ class AgendaTab extends StatefulWidget {
 
 class _AgendaTabState extends State<AgendaTab> {
   DateTime _selectedDate = DateTime.now();
+  DateTime _focusedMonth = DateTime.now();
   List<dynamic> _citas = [];
   bool _loading = false;
   bool _showForm = false;
-  int? _expandedIndex;
-  
+  bool _showCalendar = true; // Controla si se ve el calendario o los slots
+
   final TextEditingController _clienteCtrl = TextEditingController();
   final TextEditingController _horaCtrl = TextEditingController();
   final TextEditingController _telefonoCtrl = TextEditingController();
@@ -493,24 +494,101 @@ class _AgendaTabState extends State<AgendaTab> {
     }
   }
 
-  // Lógica Core del Calendario Cyberpunk
+  // --- CALENDAR GRID LOGIC ---
+  List<Widget> _buildCalendarGrid() {
+    List<Widget> gridItems = [];
+
+    // Header Días de la semana
+    List<String> weekDays = ['D', 'L', 'M', 'X', 'J', 'V', 'S'];
+    for (var day in weekDays) {
+      gridItems.add(Center(
+        child: Text(day, style: const TextStyle(color: CyberTheme.neonBlue, fontWeight: FontWeight.bold)),
+      ));
+    }
+
+    // Calcular días
+    int year = _focusedMonth.year;
+    int month = _focusedMonth.month;
+    int daysInMonth = DateUtils.getDaysInMonth(year, month);
+    DateTime firstDayOfMonth = DateTime(year, month, 1);
+    int firstWeekday = firstDayOfMonth.weekday;
+
+    // Ajuste para que Domingo sea 0 (DateTime usa Lun=1...Dom=7)
+    // Pero en nuestra grid queremos Dom=0, Lun=1...
+    // Si weekday es 7 (Domingo), en nuestra grid índice 0.
+    // Si weekday es 1 (Lunes), en nuestra grid índice 1.
+    int startingIndex = (firstWeekday % 7);
+
+    // Espacios vacíos antes del primer día
+    for (int i = 0; i < startingIndex; i++) {
+      gridItems.add(Container());
+    }
+
+    // Días del mes
+    for (int i = 1; i <= daysInMonth; i++) {
+      DateTime date = DateTime(year, month, i);
+      bool isSelected = DateUtils.isSameDay(date, _selectedDate);
+      bool isToday = DateUtils.isSameDay(date, DateTime.now());
+      bool isSunday = date.weekday == DateTime.sunday;
+
+      gridItems.add(
+        GestureDetector(
+          onTap: () {
+            if (!isSunday) {
+              setState(() {
+                _selectedDate = date;
+                _showCalendar = false; // Ir a la vista de slots
+                _fetchCitas();
+              });
+            }
+          },
+          child: Container(
+            margin: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              color: isSelected
+                  ? CyberTheme.neonYellow
+                  : (isToday ? CyberTheme.neonBlue.withOpacity(0.3) : CyberTheme.darkGrey),
+              border: Border.all(
+                color: isSelected ? CyberTheme.neonYellow : (isToday ? CyberTheme.neonBlue : Colors.transparent)
+              ),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Center(
+              child: Text(
+                "$i",
+                style: TextStyle(
+                  color: isSelected
+                    ? Colors.black
+                    : (isSunday ? Colors.grey.withOpacity(0.3) : Colors.white),
+                  fontWeight: FontWeight.bold,
+                  decoration: isSunday ? TextDecoration.lineThrough : null,
+                ),
+              ),
+            ),
+          ),
+        )
+      );
+    }
+    return gridItems;
+  }
+
+  // Lógica Core de Slots
   List<Widget> _buildTimeSlots() {
     List<Widget> slots = [];
     
-    // Configuración horario: 08:00 a 20:00
-    DateTime startTime = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day, 8, 0);
+    // Configuración horario: 09:00 a 20:00 (Cierre a las 20:00, último turno 19:00)
+    DateTime startTime = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day, 9, 0);
     DateTime endTime = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day, 20, 0);
     Duration step = const Duration(minutes: 60); // Slots de 1 hora
 
     DateTime current = startTime;
 
     while (current.isBefore(endTime)) {
-      int minutes = current.hour * 60 + current.minute;
+      int hour = current.hour;
       
-      // Regla de Descanso: 12:00 a 13:10 (720 min a 790 min)
-      if (minutes >= 720 && minutes < 790) {
+      // Regla de Descanso: 12:00 a 13:00 (No se muestra slot o se muestra deshabilitado)
+      if (hour == 12) {
         slots.add(_buildRestSlot(current));
-        // Saltar a 13:10 (aunque con slots de 1h, la siguiente sería 13:00, forzamos salto visual)
         current = current.add(step); 
         continue;
       }
@@ -539,13 +617,13 @@ class _AgendaTabState extends State<AgendaTab> {
           stops: const [0.0, 0.1],
           begin: Alignment.centerLeft,
           end: Alignment.centerRight,
-        ) // Efecto "Rayado" o deshabilitado
+        )
       ),
       child: Row(
         children: [
           Text(DateFormat('HH:mm').format(time), style: const TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
           const SizedBox(width: 20),
-          const Expanded(child: Text("/// SYSTEM COOLDOWN (DESCANSO) ///", style: TextStyle(color: Colors.grey, letterSpacing: 2))),
+          const Expanded(child: Text("/// ALMUERZO / BREAK ///", style: TextStyle(color: Colors.grey, letterSpacing: 2))),
         ],
       ),
     );
@@ -619,40 +697,59 @@ class _AgendaTabState extends State<AgendaTab> {
         children: [
           _buildHeader("AGENDA CONTROL"),
           const SizedBox(height: 10),
+
+          // --- HEADER DEL CALENDARIO / NAVEGACIÓN ---
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              GestureDetector(
-                onTap: () {
-                  setState(() { _selectedDate = _selectedDate.subtract(const Duration(days: 1)); _fetchCitas(); });
-                },
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.click,
+              if (_showCalendar) ...[
+                 GestureDetector(
+                  onTap: () => setState(() => _focusedMonth = DateTime(_focusedMonth.year, _focusedMonth.month - 1)),
                   child: const Icon(Icons.arrow_back_ios, color: CyberTheme.neonYellow),
                 ),
-              ),
-              Text(DateFormat('yyyy-MM-dd').format(_selectedDate).toUpperCase(), style: const TextStyle(fontSize: 20, letterSpacing: 2)),
-              GestureDetector(
-                onTap: () {
-                  setState(() { _selectedDate = _selectedDate.add(const Duration(days: 1)); _fetchCitas(); });
-                },
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.click,
+                Text(DateFormat('MMMM yyyy').format(_focusedMonth).toUpperCase(), style: const TextStyle(fontSize: 20, letterSpacing: 2)),
+                GestureDetector(
+                  onTap: () => setState(() => _focusedMonth = DateTime(_focusedMonth.year, _focusedMonth.month + 1)),
                   child: const Icon(Icons.arrow_forward_ios, color: CyberTheme.neonYellow),
                 ),
-              ),
+              ] else ...[
+                 GestureDetector(
+                  onTap: () => setState(() => _showCalendar = true),
+                  child: Row(
+                    children: const [
+                      Icon(Icons.arrow_back, color: CyberTheme.neonBlue),
+                      SizedBox(width: 5),
+                      Text("VOLVER AL MES", style: TextStyle(color: CyberTheme.neonBlue)),
+                    ],
+                  ),
+                ),
+                Text(DateFormat('dd MMM').format(_selectedDate).toUpperCase(), style: const TextStyle(fontSize: 20, letterSpacing: 2)),
+                const SizedBox(width: 80), // Spacer
+              ]
             ],
           ),
           const SizedBox(height: 20),
+
+          // --- CONTENIDO PRINCIPAL ---
           Expanded(
-            child: _loading 
-              ? const Center(child: CircularProgressIndicator(color: CyberTheme.neonYellow)) 
-              : ListView(children: _buildTimeSlots()),
+            child: _showCalendar
+              ? GridView.count(
+                  crossAxisCount: 7,
+                  children: _buildCalendarGrid(),
+                )
+              : (_loading
+                  ? const Center(child: CircularProgressIndicator(color: CyberTheme.neonYellow))
+                  : ListView(children: _buildTimeSlots())
+                ),
           ),
+
           const SizedBox(height: 10),
-          if (!_showForm)
-            CyberButton(text: "+ AGREGAR CITA MANUAL", onTap: () => setState(() => _showForm = true))
-          else
+
+          // --- BOTÓN AGREGAR MANUAL (Solo en vista de slots) ---
+          if (!_showCalendar && !_showForm)
+            CyberButton(text: "+ AGREGAR CITA MANUAL", onTap: () => setState(() => _showForm = true)),
+
+          if (_showForm && !_showCalendar)
             _buildFormAgregar(),
         ],
       ),

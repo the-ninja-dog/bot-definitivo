@@ -89,21 +89,34 @@ class Database:
             )
         ''')
         
+        # NUEVAS INSTRUCCIONES POR DEFECTO (AMIGABLES)
+        instrucciones_default = """PERSONALIDAD:
+- Eres un asistente AMIGABLE y buena onda ("crack", "bro", "genio").
+- NO seas aburrido. Usa emojis ocasionalmente.
+- Sé servicial pero ve al grano.
+
+PRECIOS:
+- Corte: $10
+- Barba: $5
+- Corte + Barba: $12
+
+UBICACIÓN:
+- Av. Principal 123, Centro."""
+
         # Insertar configuración por defecto si no existe
         cursor.execute('''
             INSERT OR IGNORE INTO configuracion (clave, valor) VALUES
             ('nombre_negocio', 'Barbería Z'),
             ('api_key', ''),
             ('bot_encendido', 'true'),
-            ('instrucciones', 'Horario: 9am-8pm. Corte $10. Barba $5. Corte+Barba $12.'),
+            ('instrucciones', ?),
             ('contactos_ignorados', '[]'),
             ('hora_inicio', '9'),
             ('hora_fin', '20'),
-            -- NUEVAS CLAVES PARA TWILIO
             ('twilio_sid', ''),
             ('twilio_token', ''),
-            ('twilio_whatsapp', 'whatsapp:+14155238886') -- Este es el número genérico de Twilio Sandbox, luego lo cambias
-        ''')
+            ('twilio_whatsapp', 'whatsapp:+14155238886')
+        ''', (instrucciones_default,))
         
         conn.commit()
         conn.close()

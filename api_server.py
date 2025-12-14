@@ -39,20 +39,35 @@ def agregar_al_historial(cliente, rol, mensaje):
     if len(conversaciones[cliente]) > 20:
         conversaciones[cliente] = conversaciones[cliente][-20:]
 
-# === HELPER DISPONIBILIDAD ===
-def obtener_citas_proximos_dias(dias=3):
-    """Obtiene una lista de citas ocupadas para hoy y los próximos días"""
+# === HELPER DISPONIBILIDAD INTELIGENTE ===
+def obtener_estado_agenda(dias=3):
+    """Obtiene el estado de la agenda (Citas + Reglas de Negocio)"""
     ahora = datetime.datetime.utcnow() - datetime.timedelta(hours=4)
     resumen = []
 
     for i in range(dias):
-        fecha = (ahora + datetime.timedelta(days=i)).strftime('%Y-%m-%d')
-        citas = db.obtener_citas_por_fecha(fecha)
-        if citas:
-            horas_ocupadas = [c['hora'][:5] for c in citas] # Solo HH:MM
-            resumen.append(f"{fecha}: {', '.join(horas_ocupadas)}")
+        fecha_obj = ahora + datetime.timedelta(days=i)
+        fecha_str = fecha_obj.strftime('%Y-%m-%d')
+        dia_semana = fecha_obj.weekday() # 0=Lun, 6=Dom
 
-    return "\n".join(resumen) if resumen else "Ninguna (Todo disponible)"
+        # Regla 1: Domingo CERRADO
+        if dia_semana == 6:
+            resumen.append(f"{fecha_str} (DOMINGO): CERRADO. NO AGENDAR.")
+            continue
+
+        # Obtener citas
+        citas = db.obtener_citas_por_fecha(fecha_str)
+        ocupadas = [c['hora'][:5] for c in citas] # Solo HH:MM
+
+        # Regla 2: Almuerzo siempre ocupado
+        ocupadas.append("12:00 (ALMUERZO)")
+
+        if ocupadas:
+            resumen.append(f"{fecha_str}: Ocupado en {', '.join(ocupadas)}")
+        else:
+            resumen.append(f"{fecha_str}: Todo libre (Excepto 12:00 Almuerzo)")
+
+    return "\n".join(resumen)
 
 # === BOT CON GROQ (ROTACIÓN DE KEYS) ===
 def generar_respuesta_ia(mensaje, cliente):
@@ -81,44 +96,40 @@ def generar_respuesta_ia(mensaje, cliente):
     dia_semana_int = ahora.weekday()
     dia_semana = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'][dia_semana_int]
 
-    # Obtener disponibilidad real
-    citas_ocupadas = obtener_citas_proximos_dias(4)
+    # Obtener disponibilidad real e inteligente
+    estado_agenda = obtener_estado_agenda(5) # Mirar 5 días adelante
 
     # === SISTEMA PROMPT ===
-    # Dividimos en REGLAS FIJAS (Sistema) e INSTRUCCIONES NEGOCIO (Usuario/DB)
-
     system_prompt = f"""Eres el asistente virtual de {nombre_negocio}.
 
 FECHA Y HORA ACTUAL: {dia_semana} {fecha_hoy}, {hora_actual}
 
-HORARIOS OCUPADOS (YA ESTÁN TOMADOS, NO AGENDAR AQUÍ):
-{citas_ocupadas}
+ESTADO DE LA AGENDA (DISPONIBILIDAD REAL):
+{estado_agenda}
 
-=== INSTRUCCIONES DEL NEGOCIO (PERSONALIDAD Y PRECIOS) ===
+=== INSTRUCCIONES DEL NEGOCIO (PERSONALIDAD) ===
 {instrucciones_negocio}
 
-=== REGLAS OBLIGATORIAS DEL SISTEMA (NO IGNORAR) ===
-1. HORARIO DE ALMUERZO: De 12:00 a 13:00 el local cierra. NO agendar citas a las 12:00.
-2. DOMINGOS: El local está CERRADO. Si hoy es domingo y piden cita para hoy, di que está cerrado y ofrece para mañana. NO busques disponibilidad hoy si es domingo.
-3. HORA INTELIGENTE:
-   - Si el usuario dice "4", "3", "5", etc., ASUME PM (Tarde). Ej: "4" -> 16:00.
-   - Si dice "1", asume 13:00 (1 PM).
-   - Si dice "11" o "10", asume AM.
-4. HISTORIAL Y NOMBRE:
-   - REVISA el historial de chat abajo.
-   - SI YA SABES el nombre del cliente, NO lo preguntes de nuevo. Úsalo para ser amable.
-   - SI YA SALUDASTE, no saludes de nuevo como si fuera el inicio. Ve al grano.
-   - Si no sabes el nombre, pregúntalo amablemente ANTES de confirmar la cita.
+=== REGLAS DE ORO (NO ROMPER) ===
+1. REVISA "ESTADO DE LA AGENDA" ARRIBA.
+   - Si dice "CERRADO", dile al cliente amablemente que no se puede y ofrece el siguiente día libre.
+   - Si el horario pedido está en la lista de "Ocupado", ofrece otro.
+2. FECHAS RELATIVAS:
+   - Si dicen "este martes", busca el martes de esta semana en base a la FECHA ACTUAL.
+   - Si dicen "próximo martes", suma 7 días.
+3. ALMUERZO: 12:00 a 13:00 siempre cerrado.
 
-=== FLUJO DE CONVERSACIÓN ===
-1. Analiza el historial. ¿Ya sabes el nombre? ¿Ya sabes qué servicio quiere?
-2. Si falta info, pídela (Nombre, Servicio, Hora).
-3. Si el horario pedido está en "HORARIOS OCUPADOS" o es Domingo/Almuerzo, ofrece otra opción.
-4. CONFIRMA la cita usando el formato especial.
+=== FLUJO DE CONVERSACIÓN (MEMORIA) ===
+1. LEE EL HISTORIAL ABAJO ANTES DE RESPONDER.
+2. ¿El cliente ya saludó? -> NO saludes de nuevo.
+3. ¿El cliente ya dijo su nombre? -> ÚSALO y NO lo preguntes de nuevo.
+4. ¿El cliente rechazó un servicio extra (ej: "no, nada más")? -> ASUME que quiere confirmar lo anterior (Corte) y procede a agendar. NO reinicies la charla.
+5. CONFIRMACIÓN FINAL: Solo cuando tengas Día + Hora + Servicio, escribe:
+   [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
 
-FORMATO FINAL PARA GUARDAR CITA:
-[CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
-Ejemplo: [CITA]Juan|Corte|2025-12-11|15:00[/CITA]
+IMPORTANTE:
+- Sé inteligente. Si es Domingo, di "Hoy domingo descansamos, crack. ¿Te anoto para mañana lunes?".
+- Si dicen "Las 5", es 17:00.
 """
 
     # Obtener historial y agregar mensaje actual

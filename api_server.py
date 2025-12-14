@@ -120,11 +120,13 @@ ESTADO DE LA AGENDA (DISPONIBILIDAD REAL):
 3. ALMUERZO: 12:00 a 13:00 siempre cerrado.
 
 === FLUJO DE CONVERSACIÓN (MEMORIA) ===
-1. LEE EL HISTORIAL ABAJO ANTES DE RESPONDER.
-2. ¿El cliente ya saludó? -> NO saludes de nuevo.
-3. ¿El cliente ya dijo su nombre? -> ÚSALO y NO lo preguntes de nuevo.
-4. ¿El cliente rechazó un servicio extra (ej: "no, nada más")? -> ASUME que quiere confirmar lo anterior (Corte) y procede a agendar. NO reinicies la charla.
-5. CONFIRMACIÓN FINAL: Solo cuando tengas Día + Hora + Servicio, escribe:
+1. EXTRAER NOMBRE: Busca en todo el historial. Si el usuario dijo "Soy Fernando" o "Me llamo Fernando", EL NOMBRE ES FERNANDO.
+   - NUNCA uses "Nombre" o "Cliente" como placeholder.
+   - Si no encuentras el nombre, pregúntalo.
+2. MODIFICACIONES (CRÍTICO):
+   - Si ya acordaste una hora y el usuario agrega algo (ej: "y cejas también"), MANTÉN LA HORA ACORDADA.
+   - No preguntes "¿A qué hora?" de nuevo. Solo confirma el nuevo servicio en la misma hora.
+3. CONFIRMACIÓN FINAL: Solo cuando tengas Día + Hora + Servicio + Nombre, escribe:
    [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
 
 IMPORTANTE:
@@ -191,6 +193,7 @@ def procesar_cita(respuesta, telefono):
                     fecha=datos[2].strip(),
                     hora=hora_raw,
                     cliente_nombre=datos[0].strip(),
+                    telefono=telefono,  # <-- FIX: Pasamos el teléfono
                     servicio=datos[1].strip()
                 )
                 print(f"✅ CITA GUARDADA: {datos[0]} - {datos[2]} {datos[3]}")

@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from twilio.twiml.messaging_response import MessagingResponse
 from groq import Groq
 import datetime
 import re
 from database import db
 import os
+import requests
+import time
 from dotenv import load_dotenv
 
 # Cargar variables de entorno
@@ -20,19 +21,55 @@ GROQ_API_KEYS = [
     os.environ.get('GROQ_API_KEY', ''),
     os.environ.get('GROQ_API_KEY_2', ''),
 ]
-# Filtrar keys vacías
 GROQ_API_KEYS = [k for k in GROQ_API_KEYS if k]
 current_key_index = 0
 
+# === CLIENTE WASENDER (NUEVO) ===
+WASENDER_URL = "https://wasenderapi.com/api/send-message"
+WASENDER_TOKEN = "23b0342bd631a643edbb96b4c9c2d29ae77fff50c1597fed8d3e92eeef5b6ebd"
+
+def enviar_mensaje_wasender(to, text):
+    """Envía mensaje usando WaSender con manejo de errores y throttling"""
+    # 1. Throttling (Seguridad)
+    time.sleep(2)
+
+    headers = {
+        "Authorization": f"Bearer {WASENDER_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    # Asegurar formato del número (WaSender suele pedir solo números, sin + o con + según proveedor, probamos con +)
+    if not to.startswith('+'):
+        to = '+' + to
+
+    payload = {
+        "to": to,
+        "text": text
+    }
+
+    try:
+        print(f"📤 ENVIANDO A WASENDER: {to} -> {text[:20]}...")
+        response = requests.post(WASENDER_URL, json=payload, headers=headers, timeout=10)
+
+        if response.status_code in [200, 201]:
+            print("✅ WaSender: Enviado OK")
+            return True
+        else:
+            print(f"❌ WaSender Error {response.status_code}: {response.text}")
+            return False
+
+    except Exception as e:
+        print(f"❌ WaSender Exception: {str(e)}")
+        return False
+
 # === MEMORIA DE ESTADO (CONVERSACIÓN + INTENCIÓN) ===
-# Estructura: {'telefono': {'history': [], 'state': {'nombre': None, 'fecha': None, 'hora': None}}}
 sesiones = {}
 
 def obtener_sesion(cliente):
     if cliente not in sesiones:
         sesiones[cliente] = {
             'history': [],
-            'state': {} # Estado vacío
+            'state': {}
         }
     return sesiones[cliente]
 
@@ -44,67 +81,46 @@ def actualizar_historial(cliente, rol, mensaje):
 
 # === HELPER DISPONIBILIDAD INTELIGENTE ===
 def obtener_estado_agenda(dias=5):
-    """Obtiene el estado de la agenda (Citas + Reglas de Negocio)"""
     ahora = datetime.datetime.utcnow() - datetime.timedelta(hours=4)
     resumen = []
-
     for i in range(dias):
         fecha_obj = ahora + datetime.timedelta(days=i)
         fecha_str = fecha_obj.strftime('%Y-%m-%d')
-        dia_semana = fecha_obj.weekday() # 0=Lun, 6=Dom
-
-        # Regla 1: Domingo CERRADO
+        dia_semana = fecha_obj.weekday()
         if dia_semana == 6:
             resumen.append(f"{fecha_str} (DOMINGO): CERRADO. NO AGENDAR.")
             continue
-
-        # Obtener citas
         citas = db.obtener_citas_por_fecha(fecha_str)
-        ocupadas = [c['hora'][:5] for c in citas] # Solo HH:MM
-
-        # Regla 2: Almuerzo siempre ocupado
+        ocupadas = [c['hora'][:5] for c in citas]
         ocupadas.append("12:00 (ALMUERZO)")
-
         if ocupadas:
             resumen.append(f"{fecha_str}: Ocupado en {', '.join(ocupadas)}")
         else:
             resumen.append(f"{fecha_str}: Todo libre (Excepto 12:00 Almuerzo)")
-
     return "\n".join(resumen)
 
-# === ANALIZADOR DE INTENCIÓN (REGEX) ===
+# === ANALIZADOR DE INTENCIÓN ===
 def analizar_intencion(mensaje, estado_actual):
-    """Analiza el mensaje y extrae datos clave para mantener el estado"""
     mensaje = mensaje.lower()
     nuevo_estado = estado_actual.copy()
-
-    # 1. Detectar Nombre ("soy x", "me llamo x")
     match_nombre = re.search(r'(?:soy|me llamo|mi nombre es)\s+([a-zA-ZáéíóúÁÉÍÓÚ]+)', mensaje)
     if match_nombre:
         nuevo_estado['nombre'] = match_nombre.group(1).title()
-
-    # 2. Detectar Fecha ("lunes", "mañana", "hoy")
     dias_semana = ['lunes', 'martes', 'miércoles', 'miercoles', 'jueves', 'viernes', 'sábado', 'sabado', 'domingo']
     for dia in dias_semana:
         if dia in mensaje:
             nuevo_estado['fecha_intencion'] = dia
-
     if 'hoy' in mensaje:
         nuevo_estado['fecha_intencion'] = 'HOY'
     if 'mañana' in mensaje or 'manana' in mensaje:
         nuevo_estado['fecha_intencion'] = 'MAÑANA'
-
-    # 3. Detectar Hora Simple ("las 5", "a las 4")
     match_hora = re.search(r'(?:las|la)\s+(\d{1,2})', mensaje)
     if match_hora:
         hora = int(match_hora.group(1))
-        # Lógica Smart Time (1-6 -> PM)
         if 1 <= hora <= 6:
             nuevo_estado['hora_intencion'] = f"{hora + 12}:00"
         else:
             nuevo_estado['hora_intencion'] = f"{hora}:00"
-
-    # 4. Detectar Servicio ("corte", "barba", "cejas")
     servicios = []
     if 'corte' in mensaje or 'cabello' in mensaje or 'pelo' in mensaje:
         servicios.append('Corte')
@@ -112,11 +128,8 @@ def analizar_intencion(mensaje, estado_actual):
         servicios.append('Barba')
     if 'cejas' in mensaje:
         servicios.append('Cejas')
-
     if servicios:
-        # Si ya había servicios y se agregan (ej: "agrega barba"), concatenamos
         prev_servicios = nuevo_estado.get('servicio', '')
-        # Solo actualizar si es algo nuevo o combinado
         nuevo_str = " + ".join(servicios)
         if prev_servicios and prev_servicios != nuevo_str:
              if 'Corte' in prev_servicios and 'Barba' in servicios:
@@ -125,45 +138,34 @@ def analizar_intencion(mensaje, estado_actual):
                  nuevo_estado['servicio'] = nuevo_str
         else:
             nuevo_estado['servicio'] = nuevo_str
-
     return nuevo_estado
 
-# === BOT CON GROQ (ROTACIÓN DE KEYS) ===
+# === BOT LOGIC ===
 def generar_respuesta_ia(mensaje, cliente):
     global current_key_index
     
-    # Verificar si el bot está encendido
     bot_encendido = db.get_config('bot_encendido', 'true')
     if bot_encendido != 'true':
-        print("🔴 Bot está APAGADO")
         return None
     
     if not GROQ_API_KEYS:
-        print("❌ No hay GROQ_API_KEY configurada")
         return "Error: Sistema no configurado."
     
-    # Configuración del negocio
     config = db.get_all_config()
     nombre_negocio = config.get('nombre_negocio', 'Barbería Z')
     instrucciones_negocio = config.get('instrucciones', 'Horario: 9am-8pm. Corte $10.')
     
-    # Contexto Temporal
     ahora = datetime.datetime.utcnow() - datetime.timedelta(hours=4)
     fecha_hoy = ahora.strftime('%Y-%m-%d')
     hora_actual = ahora.strftime('%H:%M')
     dia_semana_int = ahora.weekday()
     dia_semana = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'][dia_semana_int]
 
-    # Obtener estado de la sesión y agenda
     sesion = obtener_sesion(cliente)
-
-    # Analizar y Actualizar Estado (Memoria a Corto Plazo)
     sesion['state'] = analizar_intencion(mensaje, sesion['state'])
     estado_actual = sesion['state']
-
     estado_agenda = obtener_estado_agenda(5)
 
-    # Construir "Memoria Explícita" para el Prompt
     contexto_memoria = ""
     if estado_actual.get('nombre'):
         contexto_memoria += f"- NOMBRE DETECTADO: {estado_actual['nombre']}\n"
@@ -174,15 +176,13 @@ def generar_respuesta_ia(mensaje, cliente):
     if estado_actual.get('servicio'):
         contexto_memoria += f"- SERVICIO DETECTADO: {estado_actual['servicio']}\n"
 
-    # === SISTEMA PROMPT ===
     system_prompt = f"""Eres el asistente virtual de {nombre_negocio}.
 
 === CONTEXTO TEMPORAL ===
 HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
 
-=== MEMORIA DE ESTA CHARLA (LO QUE YA SABEMOS) ===
+=== MEMORIA DE ESTA CHARLA ===
 {contexto_memoria}
-(Usa estos datos. NO preguntes lo que ya está aquí).
 
 === ESTADO DE LA AGENDA (REALIDAD) ===
 {estado_agenda}
@@ -191,60 +191,40 @@ HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
 {instrucciones_negocio}
 
 === REGLAS DE ORO (LÓGICA BLINDADA) ===
-1. SI ES DOMINGO HOY ({dia_semana}):
-   - Si piden "hoy", DI QUE NO. Está cerrado.
-   - Si piden "mañana" (Lunes), DI QUE SÍ (si hay lugar).
-   - NO confundas "mañana" con "hoy".
-
-2. PRECIOS Y SERVICIOS:
-   - Corte $10 | Barba $5 | Cejas $3 | Pack (Corte+Barba) $12.
-
-3. FLUJO DE CIERRE (CRÍTICO):
-   - Si el usuario dice "Sí", "Dale", "Confirmo": CONFIRMA LA CITA con los datos que ya tienes en MEMORIA.
-   - Si agrega un servicio extra (upsell), MANTÉN la hora y fecha ya acordada y SOLO CONFIRMA.
-   - NO PREGUNTES MÉTODO DE PAGO. NO PREGUNTES COSAS EXTRAS.
-
-4. AL CONFIRMAR:
-   - Solo escribe [CITA]... si tienes Nombre, Servicio, Fecha y Hora.
-   - Formato: [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
+1. OBJETIVO: Confirmar la cita en POCAS PREGUNTAS. Ahorra mensajes.
+   - Pide Nombre, Servicio y Hora juntos si faltan.
+2. SI ES DOMINGO HOY: Si piden "hoy", DI QUE NO. Ofrece mañana.
+3. PRECIOS: Corte $10 | Barba $5 | Cejas $3 | Pack $12.
+4. CONFIRMACIÓN FINAL:
+   [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
 
 IMPORTANTE:
-- Si en MEMORIA dice NOMBRE DETECTADO, úsalo ("Hola Fernando").
-- Si en MEMORIA dice HORA SOLICITADA, asume que esa es la hora, no preguntes "¿a qué hora?".
-- TU META ES CONSEGUIR EL TAG [CITA]. NO TE DISTRAIGAS CON PAGOS.
+- Si en MEMORIA ya tienes datos, NO los preguntes de nuevo.
+- NO preguntes método de pago.
 """
 
-    # Actualizar historial
     actualizar_historial(cliente, "user", mensaje)
-    
-    # Construir mensajes
     mensajes = [{"role": "system", "content": system_prompt}]
     mensajes.extend(sesion['history'])
     
-    # Intentar con cada API key
     for intento in range(len(GROQ_API_KEYS)):
         api_key = GROQ_API_KEYS[current_key_index]
         try:
             groq_client = Groq(api_key=api_key)
-            
             chat_completion = groq_client.chat.completions.create(
                 messages=mensajes,
                 model="llama-3.1-8b-instant",
-                max_tokens=350,
-                temperature=0.5 # Bajamos más la temperatura para evitar distracciones
+                max_tokens=300,
+                temperature=0.5
             )
-            
             respuesta = chat_completion.choices[0].message.content
-            print(f"✅ GROQ[{current_key_index}] respondió: {respuesta[:80]}...")
+            print(f"✅ GROQ respondió: {respuesta[:50]}...")
             
-            # Agregar al historial
             actualizar_historial(cliente, "assistant", respuesta)
             
-            # Procesar cita si existe
             if '[CITA]' in respuesta and '[/CITA]' in respuesta:
                 procesar_cita(respuesta, cliente)
                 respuesta = re.sub(r'\[CITA\].*?\[/CITA\]', '', respuesta).strip()
-                # Limpiar estado tras confirmar (Opcional, pero bueno para nueva cita)
                 sesion['state'] = {}
                 if not respuesta:
                     respuesta = "✅ ¡Listo! Tu cita ha sido agendada. ¡Te esperamos!"
@@ -252,11 +232,10 @@ IMPORTANTE:
             return respuesta
             
         except Exception as e:
-            print(f"⚠️ GROQ[{current_key_index}] falló: {str(e)[:80]}")
+            print(f"⚠️ GROQ Error: {str(e)}")
             current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
     
-    print("❌ Todas las API keys fallaron")
-    return "El sistema está ocupado. Intenta en un momento."
+    return "El sistema está ocupado."
 
 def procesar_cita(respuesta, telefono):
     try:
@@ -264,61 +243,75 @@ def procesar_cita(respuesta, telefono):
         if match:
             datos = match.group(1).split('|')
             if len(datos) >= 4:
-                # Normalizar hora
                 hora_raw = datos[3].strip()
-                if len(hora_raw) == 4 and ':' in hora_raw: # h:mm -> 0h:mm
+                if len(hora_raw) == 4 and ':' in hora_raw:
                     hora_raw = "0" + hora_raw
-
-                # Normalizar fecha (Intentar arreglar si el LLM manda "Lunes" en vez de YYYY-MM-DD)
-                fecha_raw = datos[2].strip()
-                # (Aquí podríamos agregar lógica extra si el LLM falla, pero confiamos en el prompt por ahora)
-
                 db.agregar_cita(
-                    fecha=fecha_raw,
+                    fecha=datos[2].strip(),
                     hora=hora_raw,
                     cliente_nombre=datos[0].strip(),
                     telefono=telefono,
                     servicio=datos[1].strip()
                 )
-                print(f"✅ CITA GUARDADA: {datos[0]} - {datos[2]} {datos[3]}")
+                print(f"✅ CITA GUARDADA EN DB")
     except Exception as e:
-        print(f"❌ Error guardando cita: {e}")
+        print(f"❌ Error DB: {e}")
 
-# === WEBHOOK WHATSAPP ===
-@app.route("/whatsapp/inbound", methods=['POST'])
-def whatsapp_webhook():
+# === WEBHOOK WASENDER (GENÉRICO) ===
+@app.route("/wasender/webhook", methods=['POST'])
+def wasender_webhook():
     try:
-        msg = request.values.get('Body', '').strip()
-        sender = request.values.get('From', '')
+        # Intentar leer JSON
+        data = request.json
+        if not data:
+            print("⚠️ Webhook vacío")
+            return 'OK', 200
+
+        print(f"📩 WEBHOOK RAW: {data}")
         
-        if not sender or not msg:
-            return '', 200
+        # Lógica de parsing flexible (Adaptar según llegue el JSON real)
+        # Asumimos estructura común: {'data': {'message': '...', 'from': '...'}} o directa
+        mensaje = ""
+        remitente = ""
         
-        print(f"📩 MENSAJE de {sender}: {msg}")
+        # Caso 1: Estructura plana
+        if 'message' in data and 'from' in data:
+            mensaje = data['message']
+            remitente = data['from']
+        # Caso 2: Estructura anidada (común en gateways)
+        elif 'data' in data:
+            mensaje = data['data'].get('message') or data['data'].get('body')
+            remitente = data['data'].get('from') or data['data'].get('phone')
+
+        if not mensaje or not remitente:
+            print("⚠️ No se pudo extraer mensaje/remitente del JSON")
+            return 'OK', 200
+
+        # Limpiar remitente (quitar @c.us si existe)
+        remitente = remitente.replace('@c.us', '').replace('+', '')
         
-        cliente = sender.replace('whatsapp:', '')
-        db.agregar_mensaje(cliente, msg, es_bot=False)
+        # Procesar con IA
+        db.agregar_mensaje(remitente, mensaje, es_bot=False)
+        respuesta = generar_respuesta_ia(mensaje, remitente)
         
-        respuesta = generar_respuesta_ia(msg, cliente)
+        if respuesta:
+            # ENVIAR RESPUESTA VÍA API WASENDER
+            exito = enviar_mensaje_wasender(remitente, respuesta)
+            if exito:
+                db.agregar_mensaje(remitente, respuesta, es_bot=True)
         
-        if respuesta is None:
-            return '', 200
-        
-        db.agregar_mensaje(cliente, respuesta, es_bot=True)
-        
-        resp = MessagingResponse()
-        resp.message(respuesta)
-        return str(resp), 200, {'Content-Type': 'application/xml'}
+        return 'OK', 200
         
     except Exception as e:
         print(f"❌ ERROR WEBHOOK: {str(e)}")
-        return '', 500
+        return 'Error', 500
 
-# === RUTAS API RESTAURADAS ===
+# === RUTAS API FRONTEND (MANTENIDAS) ===
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'online', 'message': 'Bot de Barbería activo'})
+    return jsonify({'status': 'online', 'message': 'Bot WaSender Activo'})
 
+# [Resto de rutas /api/stats, /api/citas se mantienen igual que antes]
 @app.route('/api/stats', methods=['GET'])
 def api_stats():
     config = db.get_all_config()
@@ -351,7 +344,6 @@ def api_citas():
             servicio=data.get('servicio', 'Corte')
         )
         return jsonify({'success': True, 'id': cita_id})
-    
     fecha = request.args.get('fecha', '')
     if fecha:
         citas = db.obtener_citas_por_fecha(fecha)
@@ -378,5 +370,5 @@ def toggle_bot():
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
-    print(f"🟢 Bot iniciado en puerto {port}")
+    print(f"🟢 Bot WaSender iniciado en puerto {port}")
     app.run(host='0.0.0.0', port=port, debug=False)

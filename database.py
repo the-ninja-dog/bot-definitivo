@@ -109,7 +109,7 @@ PRECIOS:
 UBICACIÓN:
 - Av. Principal 123, Centro."""
 
-        # Insertar configuración por defecto si no existe
+        # Configuración por defecto (MIGRACIÓN A WASENDER)
         cursor.execute('''
             INSERT OR IGNORE INTO configuracion (clave, valor) VALUES
             ('nombre_negocio', 'Barbería Z'),
@@ -119,10 +119,12 @@ UBICACIÓN:
             ('contactos_ignorados', '[]'),
             ('hora_inicio', '9'),
             ('hora_fin', '20'),
-            ('twilio_sid', ''),
-            ('twilio_token', ''),
-            ('twilio_whatsapp', 'whatsapp:+14155238886')
+            ('wasender_token', ''),  -- Token de WaSender
+            ('wasender_url', 'https://wasenderapi.com/api/send-message') -- URL por defecto
         ''', (instrucciones_default,))
+
+        # Limpieza de claves viejas de Twilio (Opcional, pero bueno para mantener limpio)
+        cursor.execute("DELETE FROM configuracion WHERE clave LIKE 'twilio%'")
         
         conn.commit()
         conn.close()

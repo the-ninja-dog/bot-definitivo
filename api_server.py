@@ -278,7 +278,20 @@ def wasender_webhook():
         if 'message' in data and 'from' in data:
             mensaje = data['message']
             remitente = data['from']
-        # Caso 2: Estructura anidada (común en gateways)
+        # Caso 2: Estructura WaSender (según logs recientes)
+        elif 'data' in data and 'messages' in data['data']:
+            msg_data = data['data']['messages'][0] if isinstance(data['data']['messages'], list) else data['data']['messages']
+
+            # Extracción del mensaje (Prioridad: messageBody -> conversation -> text)
+            mensaje = msg_data.get('messageBody')
+            if not mensaje:
+                 contenido_msg = msg_data.get('message', {})
+                 mensaje = contenido_msg.get('conversation') or contenido_msg.get('extendedTextMessage', {}).get('text')
+
+            # Extracción del remitente
+            remitente = msg_data.get('remoteJid') or msg_data.get('key', {}).get('remoteJid')
+
+        # Caso 3: Estructura anidada genérica (fallback)
         elif 'data' in data:
             mensaje = data['data'].get('message') or data['data'].get('body')
             remitente = data['data'].get('from') or data['data'].get('phone')

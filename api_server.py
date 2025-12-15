@@ -39,8 +39,10 @@ def enviar_mensaje_wasender(to, text):
     }
 
     # Asegurar formato del número (WaSender suele pedir solo números, sin + o con + según proveedor, probamos con +)
-    if not to.startswith('+'):
-        to = '+' + to
+    # FIX: WaSender rechaza + para JIDs. Solo agregamos @s.whatsapp.net si es solo número
+    to = to.replace('+', '')
+    if '@' not in to:
+        to = to + "@s.whatsapp.net"
 
     payload = {
         "to": to,

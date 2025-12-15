@@ -502,7 +502,7 @@ class _AgendaTabState extends State<AgendaTab> {
     List<String> weekDays = ['D', 'L', 'M', 'X', 'J', 'V', 'S'];
     for (var day in weekDays) {
       gridItems.add(Center(
-        child: Text(day, style: const TextStyle(color: CyberTheme.neonBlue, fontWeight: FontWeight.bold)),
+        child: Text(day, style: const TextStyle(color: CyberTheme.neonBlue, fontWeight: FontWeight.bold, fontSize: 18)),
       ));
     }
 

@@ -6,7 +6,7 @@ def main():
     
     # 1. Instalamos las librerías necesarias (incluyendo gunicorn para Railway)
     print("1. Verificando librerías...")
-    os.system("pip install flask twilio google-generativeai flask-cors gunicorn")
+    os.system("pip install flask groq requests python-dotenv flask-cors gunicorn")
     
     # 2. Arrancamos el servidor
     print("\n2. Arrancando servidor...")

@@ -101,6 +101,11 @@ class Database:
 - NO seas aburrido. Usa emojis ocasionalmente.
 - Sé servicial pero ve al grano.
 
+HORARIOS:
+- Lunes a Sábado: 09:00 a 18:00 (Último turno 17:00).
+- Domingo: CERRADO.
+- Almuerzo: 12:00 a 13:00 (CERRADO).
+
 PRECIOS:
 - Corte: $10
 - Barba: $5

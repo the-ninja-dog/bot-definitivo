@@ -83,39 +83,52 @@ def actualizar_historial(cliente, rol, mensaje):
 
 # === HELPER DISPONIBILIDAD INTELIGENTE ===
 def obtener_estado_agenda(dias=5):
-    ahora = datetime.datetime.utcnow() - datetime.timedelta(hours=4)
+    # Usar timezone UTC para evitar deprecation warning, luego restar 4 horas
+    ahora = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=4)
     resumen = []
     for i in range(dias):
         fecha_obj = ahora + datetime.timedelta(days=i)
         fecha_str = fecha_obj.strftime('%Y-%m-%d')
         dia_semana = fecha_obj.weekday()
+
         if dia_semana == 6:
             resumen.append(f"{fecha_str} (DOMINGO): CERRADO. NO AGENDAR.")
             continue
+
         citas = db.obtener_citas_por_fecha(fecha_str)
         ocupadas = [c['hora'][:5] for c in citas]
         ocupadas.append("12:00 (ALMUERZO)")
+
+        # Filtrar horas fuera del rango 09:00 - 18:00
+        # Esto ayuda a la IA a entender que no hay slots a las 19:00 o 20:00
+        resumen.append(f"--- {fecha_str} ---")
+        resumen.append("Horario de atención: 09:00 a 18:00 (Último turno 17:00)")
         if ocupadas:
-            resumen.append(f"{fecha_str}: Ocupado en {', '.join(ocupadas)}")
+            resumen.append(f"Horarios ocupados: {', '.join(ocupadas)}")
         else:
-            resumen.append(f"{fecha_str}: Todo libre (Excepto 12:00 Almuerzo)")
+            resumen.append("Todo libre (Excepto 12:00 Almuerzo)")
+
     return "\n".join(resumen)
 
 # === ANALIZADOR DE INTENCIÓN ===
 def analizar_intencion(mensaje, estado_actual):
     mensaje = mensaje.lower()
     nuevo_estado = estado_actual.copy()
+
     match_nombre = re.search(r'(?:soy|me llamo|mi nombre es)\s+([a-zA-ZáéíóúÁÉÍÓÚ]+)', mensaje)
     if match_nombre:
         nuevo_estado['nombre'] = match_nombre.group(1).title()
+
     dias_semana = ['lunes', 'martes', 'miércoles', 'miercoles', 'jueves', 'viernes', 'sábado', 'sabado', 'domingo']
     for dia in dias_semana:
         if dia in mensaje:
             nuevo_estado['fecha_intencion'] = dia
+
     if 'hoy' in mensaje:
         nuevo_estado['fecha_intencion'] = 'HOY'
     if 'mañana' in mensaje or 'manana' in mensaje:
         nuevo_estado['fecha_intencion'] = 'MAÑANA'
+
     match_hora = re.search(r'(?:las|la)\s+(\d{1,2})', mensaje)
     if match_hora:
         hora = int(match_hora.group(1))
@@ -123,6 +136,7 @@ def analizar_intencion(mensaje, estado_actual):
             nuevo_estado['hora_intencion'] = f"{hora + 12}:00"
         else:
             nuevo_estado['hora_intencion'] = f"{hora}:00"
+
     servicios = []
     if 'corte' in mensaje or 'cabello' in mensaje or 'pelo' in mensaje:
         servicios.append('Corte')
@@ -130,16 +144,24 @@ def analizar_intencion(mensaje, estado_actual):
         servicios.append('Barba')
     if 'cejas' in mensaje:
         servicios.append('Cejas')
+
     if servicios:
         prev_servicios = nuevo_estado.get('servicio', '')
         nuevo_str = " + ".join(servicios)
-        if prev_servicios and prev_servicios != nuevo_str:
+
+        # Lógica mejorada para preservar servicios compuestos (ej: Corte + Barba)
+        if prev_servicios:
+             # Si ya había algo y lo nuevo es diferente, intentamos combinar si tiene sentido
              if 'Corte' in prev_servicios and 'Barba' in servicios:
                  nuevo_estado['servicio'] = 'Corte + Barba'
+             elif 'Corte' in servicios and 'Barba' in prev_servicios:
+                 nuevo_estado['servicio'] = 'Corte + Barba'
              else:
+                 # Si el usuario es explícito ahora, actualizamos (ej: "mejor solo corte")
                  nuevo_estado['servicio'] = nuevo_str
         else:
             nuevo_estado['servicio'] = nuevo_str
+
     return nuevo_estado
 
 # === BOT LOGIC ===
@@ -155,13 +177,16 @@ def generar_respuesta_ia(mensaje, cliente):
     
     config = db.get_all_config()
     nombre_negocio = config.get('nombre_negocio', 'Barbería Z')
-    instrucciones_negocio = config.get('instrucciones', 'Horario: 9am-8pm. Corte $10.')
+    instrucciones_negocio = config.get('instrucciones', 'Horario: 9am-6pm. Corte $10.')
     
-    ahora = datetime.datetime.utcnow() - datetime.timedelta(hours=4)
+    # Cálculo robusto de fecha/hora (UTC-4)
+    ahora = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=4)
     fecha_hoy = ahora.strftime('%Y-%m-%d')
     hora_actual = ahora.strftime('%H:%M')
     dia_semana_int = ahora.weekday()
     dia_semana = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'][dia_semana_int]
+
+    print(f"🕒 SERVER TIME (UTC-4): {fecha_hoy} {hora_actual} ({dia_semana})")
 
     sesion = obtener_sesion(cliente)
     sesion['state'] = analizar_intencion(mensaje, sesion['state'])

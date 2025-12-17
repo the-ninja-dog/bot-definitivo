@@ -238,7 +238,7 @@ Formato: [MEMORIA]{{"nombre": "...", "fecha": "...", "hora": "...", "servicio": 
 
 2. **SI TENEMOS TODO (Nombre, Hora/Fecha, Servicio)**:
    - **DETENTE**. No ofrezcas más horarios.
-   - Muestra un resumen final claro: "Perfecto {Nombre}, ¿te agendo el {Servicio} a las {Hora}?"
+   - Muestra un resumen final claro: "Perfecto {{Nombre}}, ¿te agendo el {{Servicio}} a las {{Hora}}?"
    - Pide confirmación (Sí/No).
 
 3. **CONFIRMACIÓN FINAL**:

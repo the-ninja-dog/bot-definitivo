@@ -136,8 +136,31 @@ def procesar_memoria_ia(respuesta, estado_actual):
             # Actualizar campos si no están vacíos
             if datos.get('nombre'): nuevo_estado['nombre'] = datos['nombre']
             if datos.get('fecha'): nuevo_estado['fecha_intencion'] = datos['fecha']
-            if datos.get('hora'): nuevo_estado['hora_intencion'] = datos['hora']
             if datos.get('servicio'): nuevo_estado['servicio'] = datos['servicio']
+
+            # Lógica de corrección de HORA (12h -> 24h)
+            if datos.get('hora'):
+                hora_raw = str(datos['hora']).replace(':', '').strip()
+                # Si es un número pequeño (1-8), asumir PM
+                if hora_raw.isdigit():
+                    h_int = int(hora_raw)
+                    if 1 <= h_int <= 8:
+                        nuevo_estado['hora_intencion'] = f"{h_int + 12}:00"
+                    elif h_int <= 24: # Caso normal
+                        nuevo_estado['hora_intencion'] = datos['hora']
+                # Caso "05:00" o "5:00"
+                elif ':' in datos['hora']:
+                    parts = datos['hora'].split(':')
+                    try:
+                        h_int = int(parts[0])
+                        if 1 <= h_int <= 8:
+                            nuevo_estado['hora_intencion'] = f"{h_int + 12}:{parts[1]}"
+                        else:
+                            nuevo_estado['hora_intencion'] = datos['hora']
+                    except:
+                        nuevo_estado['hora_intencion'] = datos['hora']
+                else:
+                    nuevo_estado['hora_intencion'] = datos['hora']
 
             print(f"🧠 MEMORIA ACTUALIZADA: {nuevo_estado}")
     except Exception as e:
@@ -214,11 +237,14 @@ Formato: [MEMORIA]{{"nombre": "...", "fecha": "...", "hora": "...", "servicio": 
    - Sé directo: "¿Cómo te llamas?" o "¿Qué servicio necesitas?".
 
 2. **SI TENEMOS TODO (Nombre, Hora/Fecha, Servicio)**:
-   - Muestra un resumen final ("Cita para Fernando a las 19:00 para Corte, precio $10").
+   - **DETENTE**. No ofrezcas más horarios.
+   - Muestra un resumen final claro: "Perfecto {Nombre}, ¿te agendo el {Servicio} a las {Hora}?"
    - Pide confirmación (Sí/No).
 
 3. **CONFIRMACIÓN FINAL**:
-   Si confirman, genera: [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
+   - Si el usuario dice "SÍ" o "CONFIRMO" y YA TIENES los 3 datos:
+   - **NO** preguntes nada más.
+   - Genera INMEDIATAMENTE: [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
 """
 
     actualizar_historial(cliente, "user", mensaje)

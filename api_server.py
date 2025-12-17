@@ -100,9 +100,10 @@ def obtener_estado_agenda(dias=5):
 
         resumen.append(f"📅 {fecha_str}:")
         if disponibles:
-            resumen.append(f"   ✅ Turnos libres: {', '.join(disponibles)}")
+            # Formato simplificado para evitar confusión del LLM
+            resumen.append(f"   [DISPONIBLE]: {', '.join(disponibles)}")
         else:
-            resumen.append("   ❌ COMPLETO (Sin turnos)")
+            resumen.append("   [AGOTADO]")
 
     return "\n".join(resumen)
 
@@ -238,7 +239,7 @@ HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
 {contexto_memoria}
 (¡NO pidas de nuevo lo que ya está aquí!)
 
-=== DISPONIBILIDAD REAL (TURNOS LIBRES) ===
+=== DISPONIBILIDAD REAL (SOLO PUEDES OFRECER ESTO) ===
 {estado_agenda}
 
 === INSTRUCCIONES DEL NEGOCIO ===
@@ -247,14 +248,17 @@ HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
 === OBJETIVO ACTUAL (PRIORIDAD MÁXIMA) ===
 {instruccion_dinamica}
 
-=== REGLAS TÉCNICAS (NO ROMPER) ===
-1. **GESTIÓN DE MEMORIA**: Al final de CADA respuesta, incluye SIEMPRE:
+=== REGLAS DE ORO (LÓGICA) ===
+1. **VERIFICACIÓN ESTRICTA**: Antes de decir "no disponible", REVISA la lista 'DISPONIBILIDAD REAL'.
+   - Si el usuario pide una hora (ej: "17:00") y aparece en la lista [DISPONIBLE], **DI QUE SÍ**.
+   - Si NO está en la lista, di que no y ofrece las alternativas más cercanas.
+   - NO alucines horarios ocupados si la lista dice que están libres.
+
+2. **GESTIÓN DE MEMORIA**: Al final de CADA respuesta, incluye SIEMPRE:
    [MEMORIA]{{"nombre": "...", "fecha": "...", "hora": "...", "servicio": "..."}}[/MEMORIA]
    - Copia los datos de la MEMORIA anterior.
    - Agrega/Actualiza lo nuevo que diga el usuario.
-   - NUNCA devuelvas una memoria vacía si ya tenías datos.
-
-2. **FORMATO HORA**: Usa siempre 24h (19:00). Si dicen "7" (y es tarde), es 19:00.
+   - "hora" debe ser en formato 24h (ej: 19:00).
 
 3. **CONFIRMACIÓN FINAL**:
    Solo si el usuario confirma explícitamente y tienes todo:

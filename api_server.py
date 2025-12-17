@@ -125,29 +125,38 @@ def procesar_memoria_ia(respuesta, estado_actual):
             if datos.get('fecha'): nuevo_estado['fecha_intencion'] = datos['fecha']
             if datos.get('servicio'): nuevo_estado['servicio'] = datos['servicio']
 
-            # Lógica de corrección de HORA (12h -> 24h)
+            # Lógica de corrección de HORA (12h -> 24h) y VALIDACIÓN DE RANGO
             if datos.get('hora'):
                 hora_raw = str(datos['hora']).replace(':', '').strip()
-                # Si es un número pequeño (1-8), asumir PM
+                hora_final = datos['hora']
+
+                # 1. Normalización (1-8 -> PM)
                 if hora_raw.isdigit():
                     h_int = int(hora_raw)
                     if 1 <= h_int <= 8:
-                        nuevo_estado['hora_intencion'] = f"{h_int + 12}:00"
-                    elif h_int <= 24: # Caso normal
-                        nuevo_estado['hora_intencion'] = datos['hora']
-                # Caso "05:00" o "5:00"
+                        hora_final = f"{h_int + 12}:00"
                 elif ':' in datos['hora']:
                     parts = datos['hora'].split(':')
                     try:
                         h_int = int(parts[0])
                         if 1 <= h_int <= 8:
-                            nuevo_estado['hora_intencion'] = f"{h_int + 12}:{parts[1]}"
-                        else:
-                            nuevo_estado['hora_intencion'] = datos['hora']
+                            hora_final = f"{h_int + 12}:{parts[1]}"
                     except:
-                        nuevo_estado['hora_intencion'] = datos['hora']
-                else:
-                    nuevo_estado['hora_intencion'] = datos['hora']
+                        pass
+
+                # 2. Validación de Rango (09:00 - 20:00)
+                try:
+                    h_check = int(hora_final.split(':')[0])
+                    if h_check < 9 or h_check >= 20:
+                        # Si está fuera de rango, NO lo guardamos (o lo borramos si existía)
+                        print(f"⚠️ Hora {hora_final} fuera de rango (9-20). Ignorando.")
+                        if 'hora_intencion' in nuevo_estado:
+                            del nuevo_estado['hora_intencion']
+                    else:
+                        nuevo_estado['hora_intencion'] = hora_final
+                except:
+                    # Si no podemos validar, no guardamos basura
+                    pass
 
             print(f"🧠 MEMORIA ACTUALIZADA: {nuevo_estado}")
     except Exception as e:
@@ -259,6 +268,7 @@ HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
    - Copia los datos de la MEMORIA anterior.
    - Agrega/Actualiza lo nuevo que diga el usuario.
    - "hora" debe ser en formato 24h (ej: 19:00).
+   - REGLA DE ORO: Si la hora detectada es menor a 09:00 o mayor a 20:00, NO LA GUARDES en memoria (déjala vacía o null).
 
 3. **CONFIRMACIÓN FINAL**:
    Solo si el usuario confirma explícitamente y tienes todo:

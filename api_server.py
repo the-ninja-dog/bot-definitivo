@@ -99,10 +99,10 @@ def obtener_estado_agenda(dias=5):
         ocupadas = [c['hora'][:5] for c in citas]
         ocupadas.append("12:00 (ALMUERZO)")
 
-        # Filtrar horas fuera del rango 09:00 - 18:00
-        # Esto ayuda a la IA a entender que no hay slots a las 19:00 o 20:00
+        # Filtrar horas fuera del rango 09:00 - 20:00
+        # Esto ayuda a la IA a entender que no hay slots a las 21:00
         resumen.append(f"--- {fecha_str} ---")
-        resumen.append("Horario de atención: 09:00 a 18:00 (Último turno 17:00)")
+        resumen.append("Horario de atención: 09:00 a 20:00 (Último turno 19:00)")
         if ocupadas:
             resumen.append(f"Horarios ocupados: {', '.join(ocupadas)}")
         else:
@@ -132,7 +132,9 @@ def analizar_intencion(mensaje, estado_actual):
     match_hora = re.search(r'(?:las|la)\s+(\d{1,2})', mensaje)
     if match_hora:
         hora = int(match_hora.group(1))
-        if 1 <= hora <= 6:
+        # Ampliado rango PM hasta las 8 PM (20:00)
+        # Si dicen "la 1", "las 2", ..., "las 8", asumimos PM.
+        if 1 <= hora <= 8:
             nuevo_estado['hora_intencion'] = f"{hora + 12}:00"
         else:
             nuevo_estado['hora_intencion'] = f"{hora}:00"

@@ -102,7 +102,7 @@ class Database:
 - Sé servicial pero ve al grano.
 
 HORARIOS:
-- Lunes a Sábado: 09:00 a 18:00 (Último turno 17:00).
+- Lunes a Sábado: 09:00 a 20:00 (Último turno 19:00).
 - Domingo: CERRADO.
 - Almuerzo: 12:00 a 13:00 (CERRADO).
 

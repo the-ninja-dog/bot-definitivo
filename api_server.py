@@ -86,27 +86,36 @@ def obtener_estado_agenda(dias=5):
     # Usar timezone UTC para evitar deprecation warning, luego restar 4 horas
     ahora = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=4)
     resumen = []
+
+    # Horas posibles de 09:00 a 19:00 (Cierre 20:00)
+    # Excluyendo almuerzo 12:00
+    horas_totales = [f"{h:02d}:00" for h in range(9, 20) if h != 12]
+
     for i in range(dias):
         fecha_obj = ahora + datetime.timedelta(days=i)
         fecha_str = fecha_obj.strftime('%Y-%m-%d')
         dia_semana = fecha_obj.weekday()
 
         if dia_semana == 6:
-            resumen.append(f"{fecha_str} (DOMINGO): CERRADO. NO AGENDAR.")
+            resumen.append(f"🚫 {fecha_str} (DOMINGO): CERRADO.")
             continue
 
         citas = db.obtener_citas_por_fecha(fecha_str)
         ocupadas = [c['hora'][:5] for c in citas]
-        ocupadas.append("12:00 (ALMUERZO)")
 
-        # Filtrar horas fuera del rango 09:00 - 20:00
-        # Esto ayuda a la IA a entender que no hay slots a las 21:00
-        resumen.append(f"--- {fecha_str} ---")
-        resumen.append("Horario de atención: 09:00 a 20:00 (Último turno 19:00)")
-        if ocupadas:
-            resumen.append(f"Horarios ocupados: {', '.join(ocupadas)}")
+        # Calcular disponibles
+        disponibles = [h for h in horas_totales if h not in ocupadas]
+
+        # Si es HOY, filtrar horas pasadas
+        if i == 0:
+            hora_actual_int = int(ahora.strftime('%H'))
+            disponibles = [h for h in disponibles if int(h[:2]) > hora_actual_int]
+
+        resumen.append(f"📅 {fecha_str}:")
+        if disponibles:
+            resumen.append(f"   ✅ Turnos libres: {', '.join(disponibles)}")
         else:
-            resumen.append("Todo libre (Excepto 12:00 Almuerzo)")
+            resumen.append("   ❌ COMPLETO (Sin turnos)")
 
     return "\n".join(resumen)
 
@@ -213,23 +222,32 @@ HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
 === MEMORIA DE ESTA CHARLA ===
 {contexto_memoria}
 
-=== ESTADO DE LA AGENDA (REALIDAD) ===
+=== DISPONIBILIDAD REAL (SOLO OFRECE ESTO) ===
 {estado_agenda}
 
 === INSTRUCCIONES DEL NEGOCIO ===
 {instrucciones_negocio}
 
-=== REGLAS DE ORO (LÓGICA BLINDADA) ===
-1. OBJETIVO: Confirmar la cita en POCAS PREGUNTAS. Ahorra mensajes.
-   - Pide Nombre, Servicio y Hora juntos si faltan.
-2. SI ES DOMINGO HOY: Si piden "hoy", DI QUE NO. Ofrece mañana.
-3. PRECIOS: Corte $10 | Barba $5 | Cejas $3 | Pack $12.
-4. CONFIRMACIÓN FINAL:
-   [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
+=== COMPORTAMIENTO OBLIGATORIO ===
+1. **PROACTIVIDAD TOTAL**: Si te saludan o preguntan disponibilidad, **MUESTRA LA LISTA DE TURNOS LIBRES** de hoy (o mañana si hoy no queda nada) INMEDIATAMENTE. No preguntes "¿qué día quieres?" si no has ofrecido los de hoy primero.
 
-IMPORTANTE:
-- Si en MEMORIA ya tienes datos, NO los preguntes de nuevo.
-- NO preguntes método de pago.
+   Ejemplo de respuesta ideal:
+   "¡Hola! 👋 Buenas tardes. Sí, tengo estos turnos libres para hoy:
+   - 15:00, 16:00, 18:00
+
+   Para agendar, por favor confírmame:
+   1. Tu Nombre
+   2. La hora elegida
+   3. El servicio (Corte, Barba, Cejas)"
+
+2. **RESTRICCIONES**:
+   - NO inventes horarios que no estén en la lista de "DISPONIBILIDAD REAL".
+   - Si es Domingo o ya no hay turnos hoy, dilo claramente y muestra los de mañana.
+   - PRECIOS: Corte $10 | Barba $5 | Cejas $3 | Pack $12.
+
+3. **CONFIRMACIÓN**:
+   Cuando tengas (Nombre + Servicio + Hora/Fecha válida), genera ESTE CÓDIGO FINAL:
+   [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
 """
 
     actualizar_historial(cliente, "user", mensaje)

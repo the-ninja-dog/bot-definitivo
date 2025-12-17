@@ -193,13 +193,50 @@ def generar_respuesta_ia(mensaje, cliente):
     if estado_actual.get('servicio'):
         contexto_memoria += f"- SERVICIO: {estado_actual['servicio']}\n"
 
+    # === LÓGICA DE ESTADOS DINÁMICA (STATE MACHINE) ===
+    # Determinamos qué falta para guiar al LLM con una instrucción ÚNICA y CLARA.
+    datos_faltantes = []
+    if not estado_actual.get('nombre'): datos_faltantes.append("NOMBRE")
+    if not estado_actual.get('servicio'): datos_faltantes.append("SERVICIO")
+    if not (estado_actual.get('fecha_intencion') and estado_actual.get('hora_intencion')): datos_faltantes.append("FECHA Y HORA")
+
+    instruccion_dinamica = ""
+
+    if len(datos_faltantes) == 3:
+        # 1. INICIO / NADA: Ofrecer turnos.
+        instruccion_dinamica = """
+        OBJETIVO: OFRECER TURNOS.
+        - Saluda cordialmente.
+        - MUESTRA la lista de 'DISPONIBILIDAD REAL' inmediatamente.
+        - Pregunta: "¿Qué horario te queda mejor?"
+        """
+    elif len(datos_faltantes) > 0:
+        # 2. PROCESO (Faltan datos): Pedir lo que falta.
+        faltan_str = ", ".join(datos_faltantes)
+        instruccion_dinamica = f"""
+        OBJETIVO: COMPLETAR DATOS ({faltan_str}).
+        - YA TENEMOS algunos datos (ver MEMORIA). NO LOS VUELVAS A PEDIR.
+        - SOLO PREGUNTA por: {faltan_str}.
+        - IMPORTANTE: NO vuelvas a mostrar la lista de horarios disponibles. Ya estamos negociando un turno específico.
+        - Sé directo y breve.
+        """
+    else:
+        # 3. COMPLETO: Confirmar.
+        instruccion_dinamica = """
+        OBJETIVO: CONFIRMAR CITA.
+        - Tienes TODOS los datos.
+        - Di: "Perfecto [Nombre], ¿te agendo el [Servicio] para el [Fecha] a las [Hora]?"
+        - Si responde SÍ/CONFIRMO: Genera el código [CITA]...[/CITA].
+        """
+
     system_prompt = f"""Eres el asistente virtual de {nombre_negocio}.
 
 === CONTEXTO TEMPORAL ===
 HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
 
-=== MEMORIA DE ESTA CHARLA (NO PREGUNTES DE NUEVO ESTOS DATOS) ===
+=== MEMORIA DE ESTA CHARLA (DATOS YA OBTENIDOS) ===
 {contexto_memoria}
+(¡NO pidas de nuevo lo que ya está aquí!)
 
 === DISPONIBILIDAD REAL (TURNOS LIBRES) ===
 {estado_agenda}
@@ -207,30 +244,21 @@ HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
 === INSTRUCCIONES DEL NEGOCIO ===
 {instrucciones_negocio}
 
-=== TAREA CRÍTICA: GESTIÓN DE MEMORIA OBLIGATORIA ===
-Al final de CADA respuesta, DEBES incluir un bloque JSON oculto con los datos que detectes del usuario.
-Formato: [MEMORIA]{{"nombre": "...", "fecha": "...", "hora": "...", "servicio": "..."}}[/MEMORIA]
-- Si detectas un dato nuevo, agrégalo.
-- Si el usuario corrige un dato, actualízalo.
-- Mantén los datos anteriores si no cambian.
-- Si no detectas nada nuevo, repite lo que ya sabes.
-- "hora" debe ser en formato 24h (ej: 19:00). Si dicen "7" y es tarde, es 19:00.
+=== OBJETIVO ACTUAL (PRIORIDAD MÁXIMA) ===
+{instruccion_dinamica}
 
-=== FLUJO DE CONVERSACIÓN (NATURAL) ===
-1. **SI FALTA INFORMACIÓN**:
-   - Saluda y menciona los turnos disponibles SOLO si es el inicio de la charla o si preguntan disponibilidad.
-   - Si ya estamos hablando de un horario específico (ej: "quiero a las 19"), **NO REPITAS LA LISTA DE TURNOS**. Simplemente confirma si ese horario está libre y pide lo que falta (Nombre o Servicio).
-   - Sé directo: "¿Cómo te llamas?" o "¿Qué servicio necesitas?".
+=== REGLAS TÉCNICAS (NO ROMPER) ===
+1. **GESTIÓN DE MEMORIA**: Al final de CADA respuesta, incluye SIEMPRE:
+   [MEMORIA]{{"nombre": "...", "fecha": "...", "hora": "...", "servicio": "..."}}[/MEMORIA]
+   - Copia los datos de la MEMORIA anterior.
+   - Agrega/Actualiza lo nuevo que diga el usuario.
+   - NUNCA devuelvas una memoria vacía si ya tenías datos.
 
-2. **SI TENEMOS TODO (Nombre, Hora/Fecha, Servicio)**:
-   - **DETENTE**. No ofrezcas más horarios.
-   - Muestra un resumen final claro: "Perfecto {{Nombre}}, ¿te agendo el {{Servicio}} a las {{Hora}}?"
-   - Pide confirmación (Sí/No).
+2. **FORMATO HORA**: Usa siempre 24h (19:00). Si dicen "7" (y es tarde), es 19:00.
 
 3. **CONFIRMACIÓN FINAL**:
-   - Si el usuario dice "SÍ" o "CONFIRMO" y YA TIENES los 3 datos:
-   - **NO** preguntes nada más.
-   - Genera INMEDIATAMENTE: [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
+   Solo si el usuario confirma explícitamente y tienes todo:
+   [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
 """
 
     # El mensaje del usuario YA fue guardado en DB por wasender_webhook -> db.agregar_mensaje
@@ -256,7 +284,7 @@ Formato: [MEMORIA]{{"nombre": "...", "fecha": "...", "hora": "...", "servicio": 
             # Guardar respuesta del bot en el historial (DB)
             # El mensaje original (con [MEMORIA]...) se guarda para contexto, pero al usuario se le muestra limpio
             db.agregar_mensaje(cliente, respuesta, es_bot=True)
-            
+
             # Procesar Memoria Oculta
             nuevo_estado = procesar_memoria_ia(respuesta, sesion['state'])
 

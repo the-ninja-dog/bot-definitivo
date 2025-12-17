@@ -94,6 +94,15 @@ class Database:
                 FOREIGN KEY (conversacion_id) REFERENCES conversaciones(id)
             )
         ''')
+
+        # Tabla de SESIONES BOT (Persistencia de Estado)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sesiones_bot (
+                cliente_id TEXT PRIMARY KEY,
+                estado_json TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
         # NUEVAS INSTRUCCIONES POR DEFECTO (AMIGABLES)
         instrucciones_default = """PERSONALIDAD:
@@ -261,6 +270,54 @@ UBICACIÓN:
         row = cursor.fetchone()
         conn.close()
         return row['total'] if row else 0
+
+    # ==================== SESIONES BOT (PERSISTENCIA) ====================
+
+    def get_session(self, cliente_id):
+        """Recupera el estado y el historial de chat de un cliente"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        # 1. Recuperar Estado (Memoria JSON)
+        cursor.execute('SELECT estado_json FROM sesiones_bot WHERE cliente_id = ?', (cliente_id,))
+        row = cursor.fetchone()
+        state = {}
+        if row and row['estado_json']:
+            try:
+                state = json.loads(row['estado_json'])
+            except:
+                state = {}
+
+        # 2. Recuperar Historial (Últimos 10 mensajes)
+        # Usamos 'mensajes' filtrando por 'cliente_nombre' que en este contexto es el ID/Teléfono
+        cursor.execute('''
+            SELECT es_bot, contenido
+            FROM mensajes
+            WHERE cliente_nombre = ?
+            ORDER BY id DESC LIMIT 10
+        ''', (cliente_id,))
+        rows = cursor.fetchall()
+
+        # Formato OpenAI: [{"role": "user"|"assistant", "content": "..."}]
+        history = []
+        for r in rows: # Vienen del más reciente al más antiguo
+            role = "assistant" if r['es_bot'] else "user"
+            history.insert(0, {"role": role, "content": r['contenido']})
+
+        conn.close()
+        return {"state": state, "history": history}
+
+    def save_session_state(self, cliente_id, state_dict):
+        """Guarda el estado actual del bot para un cliente"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        state_json = json.dumps(state_dict)
+        cursor.execute('''
+            INSERT OR REPLACE INTO sesiones_bot (cliente_id, estado_json, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+        ''', (cliente_id, state_json))
+        conn.commit()
+        conn.close()
 
 # Instancia global
 db = Database()

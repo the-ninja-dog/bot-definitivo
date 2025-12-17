@@ -66,21 +66,7 @@ def enviar_mensaje_wasender(to, text):
         return False
 
 # === MEMORIA DE ESTADO (CONVERSACIÓN + INTENCIÓN) ===
-sesiones = {}
-
-def obtener_sesion(cliente):
-    if cliente not in sesiones:
-        sesiones[cliente] = {
-            'history': [],
-            'state': {}
-        }
-    return sesiones[cliente]
-
-def actualizar_historial(cliente, rol, mensaje):
-    sesion = obtener_sesion(cliente)
-    sesion['history'].append({"role": rol, "content": mensaje})
-    if len(sesion['history']) > 20:
-        sesion['history'] = sesion['history'][-20:]
+# sesiones = {}  <-- Eliminado, ahora usamos DB
 
 # === HELPER DISPONIBILIDAD INTELIGENTE ===
 def obtener_estado_agenda(dias=5):
@@ -192,8 +178,8 @@ def generar_respuesta_ia(mensaje, cliente):
 
     print(f"🕒 SERVER TIME (UTC-4): {fecha_hoy} {hora_actual} ({dia_semana})")
 
-    sesion = obtener_sesion(cliente)
-    # Ya no usamos regex, usamos la memoria del turno anterior
+    # Recuperar sesión desde DB (Persistencia)
+    sesion = db.get_session(cliente)
     estado_actual = sesion['state']
     estado_agenda = obtener_estado_agenda(5)
 
@@ -247,7 +233,10 @@ Formato: [MEMORIA]{{"nombre": "...", "fecha": "...", "hora": "...", "servicio": 
    - Genera INMEDIATAMENTE: [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
 """
 
-    actualizar_historial(cliente, "user", mensaje)
+    # El mensaje del usuario YA fue guardado en DB por wasender_webhook -> db.agregar_mensaje
+    # Pero si llamamos a esta función desde otro lado, aseguramos que la "history" en sesion tenga el último mensaje
+    # Nota: db.get_session ya trae los últimos mensajes INCLUYENDO el que acabamos de recibir si se guardó antes.
+
     mensajes = [{"role": "system", "content": system_prompt}]
     mensajes.extend(sesion['history'])
     
@@ -263,12 +252,16 @@ Formato: [MEMORIA]{{"nombre": "...", "fecha": "...", "hora": "...", "servicio": 
             )
             respuesta = chat_completion.choices[0].message.content
             print(f"✅ GROQ respondió: {respuesta[:50]}...")
-            
-            actualizar_historial(cliente, "assistant", respuesta)
+
+            # Guardar respuesta del bot en el historial (DB)
+            # El mensaje original (con [MEMORIA]...) se guarda para contexto, pero al usuario se le muestra limpio
+            db.agregar_mensaje(cliente, respuesta, es_bot=True)
             
             # Procesar Memoria Oculta
             nuevo_estado = procesar_memoria_ia(respuesta, sesion['state'])
-            sesion['state'] = nuevo_estado
+
+            # GUARDAR ESTADO EN DB (PERSISTENCIA)
+            db.save_session_state(cliente, nuevo_estado)
             
             # Limpiar bloque de memoria de la respuesta al usuario
             respuesta_visible = re.sub(r'\[MEMORIA\].*?\[/MEMORIA\]', '', respuesta, flags=re.DOTALL).strip()
@@ -276,7 +269,10 @@ Formato: [MEMORIA]{{"nombre": "...", "fecha": "...", "hora": "...", "servicio": 
             if '[CITA]' in respuesta_visible and '[/CITA]' in respuesta_visible:
                 procesar_cita(respuesta_visible, cliente)
                 respuesta_visible = re.sub(r'\[CITA\].*?\[/CITA\]', '', respuesta_visible).strip()
-                sesion['state'] = {} # Reset estado tras confirmar
+
+                # Reset estado tras confirmar y guardar
+                db.save_session_state(cliente, {})
+
                 if not respuesta_visible:
                     respuesta_visible = "✅ ¡Listo! Tu cita ha sido agendada. ¡Te esperamos!"
 
@@ -360,9 +356,10 @@ def wasender_webhook():
         
         if respuesta:
             # ENVIAR RESPUESTA VÍA API WASENDER
+            # Nota: 'respuesta' ya es la versión limpia (sin [MEMORIA]) porque generar_respuesta_ia devuelve eso
             exito = enviar_mensaje_wasender(remitente, respuesta)
-            if exito:
-                db.agregar_mensaje(remitente, respuesta, es_bot=True)
+            # El mensaje YA se guardó en generar_respuesta_ia con el bloque de memoria para contexto futuro
+            # No lo guardamos de nuevo aquí
         
         return 'OK', 200
         

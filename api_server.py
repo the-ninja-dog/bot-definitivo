@@ -4,6 +4,7 @@ from flask_cors import CORS
 from groq import Groq
 import datetime
 import re
+import json
 from database import db
 import os
 import requests
@@ -119,59 +120,28 @@ def obtener_estado_agenda(dias=5):
 
     return "\n".join(resumen)
 
-# === ANALIZADOR DE INTENCIÓN ===
-def analizar_intencion(mensaje, estado_actual):
-    mensaje = mensaje.lower()
+# === PROCESADOR DE MEMORIA LLM ===
+def procesar_memoria_ia(respuesta, estado_actual):
+    """Extrae y actualiza el estado basado en la respuesta JSON oculta del LLM"""
     nuevo_estado = estado_actual.copy()
+    try:
+        # Buscar bloque [MEMORIA]...[/MEMORIA]
+        match = re.search(r'\[MEMORIA\](.*?)\[/MEMORIA\]', respuesta, re.DOTALL)
+        if match:
+            json_str = match.group(1).strip()
+            # Intento de corrección de JSON común (comillas simples a dobles)
+            json_str = json_str.replace("'", '"')
+            datos = json.loads(json_str)
 
-    match_nombre = re.search(r'(?:soy|me llamo|mi nombre es)\s+([a-zA-ZáéíóúÁÉÍÓÚ]+)', mensaje)
-    if match_nombre:
-        nuevo_estado['nombre'] = match_nombre.group(1).title()
+            # Actualizar campos si no están vacíos
+            if datos.get('nombre'): nuevo_estado['nombre'] = datos['nombre']
+            if datos.get('fecha'): nuevo_estado['fecha_intencion'] = datos['fecha']
+            if datos.get('hora'): nuevo_estado['hora_intencion'] = datos['hora']
+            if datos.get('servicio'): nuevo_estado['servicio'] = datos['servicio']
 
-    dias_semana = ['lunes', 'martes', 'miércoles', 'miercoles', 'jueves', 'viernes', 'sábado', 'sabado', 'domingo']
-    for dia in dias_semana:
-        if dia in mensaje:
-            nuevo_estado['fecha_intencion'] = dia
-
-    if 'hoy' in mensaje:
-        nuevo_estado['fecha_intencion'] = 'HOY'
-    if 'mañana' in mensaje or 'manana' in mensaje:
-        nuevo_estado['fecha_intencion'] = 'MAÑANA'
-
-    match_hora = re.search(r'(?:las|la)\s+(\d{1,2})', mensaje)
-    if match_hora:
-        hora = int(match_hora.group(1))
-        # Ampliado rango PM hasta las 8 PM (20:00)
-        # Si dicen "la 1", "las 2", ..., "las 8", asumimos PM.
-        if 1 <= hora <= 8:
-            nuevo_estado['hora_intencion'] = f"{hora + 12}:00"
-        else:
-            nuevo_estado['hora_intencion'] = f"{hora}:00"
-
-    servicios = []
-    if 'corte' in mensaje or 'cabello' in mensaje or 'pelo' in mensaje:
-        servicios.append('Corte')
-    if 'barba' in mensaje:
-        servicios.append('Barba')
-    if 'cejas' in mensaje:
-        servicios.append('Cejas')
-
-    if servicios:
-        prev_servicios = nuevo_estado.get('servicio', '')
-        nuevo_str = " + ".join(servicios)
-
-        # Lógica mejorada para preservar servicios compuestos (ej: Corte + Barba)
-        if prev_servicios:
-             # Si ya había algo y lo nuevo es diferente, intentamos combinar si tiene sentido
-             if 'Corte' in prev_servicios and 'Barba' in servicios:
-                 nuevo_estado['servicio'] = 'Corte + Barba'
-             elif 'Corte' in servicios and 'Barba' in prev_servicios:
-                 nuevo_estado['servicio'] = 'Corte + Barba'
-             else:
-                 # Si el usuario es explícito ahora, actualizamos (ej: "mejor solo corte")
-                 nuevo_estado['servicio'] = nuevo_str
-        else:
-            nuevo_estado['servicio'] = nuevo_str
+            print(f"🧠 MEMORIA ACTUALIZADA: {nuevo_estado}")
+    except Exception as e:
+        print(f"⚠️ Error procesando memoria IA: {e}")
 
     return nuevo_estado
 
@@ -200,54 +170,55 @@ def generar_respuesta_ia(mensaje, cliente):
     print(f"🕒 SERVER TIME (UTC-4): {fecha_hoy} {hora_actual} ({dia_semana})")
 
     sesion = obtener_sesion(cliente)
-    sesion['state'] = analizar_intencion(mensaje, sesion['state'])
+    # Ya no usamos regex, usamos la memoria del turno anterior
     estado_actual = sesion['state']
     estado_agenda = obtener_estado_agenda(5)
 
     contexto_memoria = ""
     if estado_actual.get('nombre'):
-        contexto_memoria += f"- NOMBRE DETECTADO: {estado_actual['nombre']}\n"
+        contexto_memoria += f"- NOMBRE: {estado_actual['nombre']}\n"
     if estado_actual.get('fecha_intencion'):
-        contexto_memoria += f"- FECHA SOLICITADA: {estado_actual['fecha_intencion']}\n"
+        contexto_memoria += f"- FECHA: {estado_actual['fecha_intencion']}\n"
     if estado_actual.get('hora_intencion'):
-        contexto_memoria += f"- HORA SOLICITADA: {estado_actual['hora_intencion']}\n"
+        contexto_memoria += f"- HORA: {estado_actual['hora_intencion']}\n"
     if estado_actual.get('servicio'):
-        contexto_memoria += f"- SERVICIO DETECTADO: {estado_actual['servicio']}\n"
+        contexto_memoria += f"- SERVICIO: {estado_actual['servicio']}\n"
 
     system_prompt = f"""Eres el asistente virtual de {nombre_negocio}.
 
 === CONTEXTO TEMPORAL ===
 HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
 
-=== MEMORIA DE ESTA CHARLA ===
+=== MEMORIA DE ESTA CHARLA (NO PREGUNTES DE NUEVO ESTOS DATOS) ===
 {contexto_memoria}
 
-=== DISPONIBILIDAD REAL (SOLO OFRECE ESTO) ===
+=== DISPONIBILIDAD REAL (TURNOS LIBRES) ===
 {estado_agenda}
 
 === INSTRUCCIONES DEL NEGOCIO ===
 {instrucciones_negocio}
 
-=== COMPORTAMIENTO OBLIGATORIO ===
-1. **PROACTIVIDAD TOTAL**: Si te saludan o preguntan disponibilidad, **MUESTRA LA LISTA DE TURNOS LIBRES** de hoy (o mañana si hoy no queda nada) INMEDIATAMENTE. No preguntes "¿qué día quieres?" si no has ofrecido los de hoy primero.
+=== TAREA CRÍTICA: GESTIÓN DE MEMORIA OBLIGATORIA ===
+Al final de CADA respuesta, DEBES incluir un bloque JSON oculto con los datos que detectes del usuario.
+Formato: [MEMORIA]{{"nombre": "...", "fecha": "...", "hora": "...", "servicio": "..."}}[/MEMORIA]
+- Si detectas un dato nuevo, agrégalo.
+- Si el usuario corrige un dato, actualízalo.
+- Mantén los datos anteriores si no cambian.
+- Si no detectas nada nuevo, repite lo que ya sabes.
+- "hora" debe ser en formato 24h (ej: 19:00). Si dicen "7" y es tarde, es 19:00.
 
-   Ejemplo de respuesta ideal:
-   "¡Hola! 👋 Buenas tardes. Sí, tengo estos turnos libres para hoy:
-   - 15:00, 16:00, 18:00
+=== FLUJO DE CONVERSACIÓN (NATURAL) ===
+1. **SI FALTA INFORMACIÓN**:
+   - Saluda y menciona los turnos disponibles SOLO si es el inicio de la charla o si preguntan disponibilidad.
+   - Si ya estamos hablando de un horario específico (ej: "quiero a las 19"), **NO REPITAS LA LISTA DE TURNOS**. Simplemente confirma si ese horario está libre y pide lo que falta (Nombre o Servicio).
+   - Sé directo: "¿Cómo te llamas?" o "¿Qué servicio necesitas?".
 
-   Para agendar, por favor confírmame:
-   1. Tu Nombre
-   2. La hora elegida
-   3. El servicio (Corte, Barba, Cejas)"
+2. **SI TENEMOS TODO (Nombre, Hora/Fecha, Servicio)**:
+   - Muestra un resumen final ("Cita para Fernando a las 19:00 para Corte, precio $10").
+   - Pide confirmación (Sí/No).
 
-2. **RESTRICCIONES**:
-   - NO inventes horarios que no estén en la lista de "DISPONIBILIDAD REAL".
-   - Si es Domingo o ya no hay turnos hoy, dilo claramente y muestra los de mañana.
-   - PRECIOS: Corte $10 | Barba $5 | Cejas $3 | Pack $12.
-
-3. **CONFIRMACIÓN**:
-   Cuando tengas (Nombre + Servicio + Hora/Fecha válida), genera ESTE CÓDIGO FINAL:
-   [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
+3. **CONFIRMACIÓN FINAL**:
+   Si confirman, genera: [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
 """
 
     actualizar_historial(cliente, "user", mensaje)
@@ -269,14 +240,21 @@ HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
             
             actualizar_historial(cliente, "assistant", respuesta)
             
-            if '[CITA]' in respuesta and '[/CITA]' in respuesta:
-                procesar_cita(respuesta, cliente)
-                respuesta = re.sub(r'\[CITA\].*?\[/CITA\]', '', respuesta).strip()
-                sesion['state'] = {}
-                if not respuesta:
-                    respuesta = "✅ ¡Listo! Tu cita ha sido agendada. ¡Te esperamos!"
+            # Procesar Memoria Oculta
+            nuevo_estado = procesar_memoria_ia(respuesta, sesion['state'])
+            sesion['state'] = nuevo_estado
             
-            return respuesta
+            # Limpiar bloque de memoria de la respuesta al usuario
+            respuesta_visible = re.sub(r'\[MEMORIA\].*?\[/MEMORIA\]', '', respuesta, flags=re.DOTALL).strip()
+
+            if '[CITA]' in respuesta_visible and '[/CITA]' in respuesta_visible:
+                procesar_cita(respuesta_visible, cliente)
+                respuesta_visible = re.sub(r'\[CITA\].*?\[/CITA\]', '', respuesta_visible).strip()
+                sesion['state'] = {} # Reset estado tras confirmar
+                if not respuesta_visible:
+                    respuesta_visible = "✅ ¡Listo! Tu cita ha sido agendada. ¡Te esperamos!"
+
+            return respuesta_visible
             
         except Exception as e:
             print(f"⚠️ GROQ Error: {str(e)}")

@@ -245,12 +245,11 @@ def generar_respuesta_ia(mensaje, cliente, push_name=None):
     instruccion_dinamica = ""
 
     if len(datos_faltantes) == 3:
-        # 1. INICIO / NADA: Ofrecer turnos.
+        # 1. INICIO / NADA: Saludo Simple (Anti-Spam).
         instruccion_dinamica = """
-        OBJETIVO: OFRECER TURNOS.
-        - Saluda cordialmente.
-        - MUESTRA la lista de 'DISPONIBILIDAD REAL' inmediatamente.
-        - Pregunta: "¿Qué horario te queda mejor?"
+        OBJETIVO: SALUDAR Y ORIENTAR.
+        - Di: "¡Hola! 👋 Soy el asistente de Barbería Z. ¿Te gustaría ver los turnos disponibles para hoy o para mañana?"
+        - NO muestres la lista de horarios todavía. Espera que el usuario elija.
         """
     elif len(datos_faltantes) > 0:
         # 2. PROCESO (Faltan datos): Pedir lo que falta.
@@ -347,21 +346,30 @@ HORARIO OFICIAL: 08:00 AM a 20:00 PM.
                 datos_cita = procesar_cita(respuesta_visible, cliente)
 
                 # BUGFIX: Limpieza de chat (Triple despedida)
-                # Si hay cita, forzamos un mensaje único y limpio.
                 match_cita = re.search(r'\[CITA\](.+?)\[/CITA\]', respuesta_visible)
-                if match_cita:
-                    # Intentar obtener datos bonitos para la respuesta
-                    try:
-                        raw = match_cita.group(1).split('|')
-                        c_nombre = raw[0].strip().title()
-                        c_fecha = raw[2].strip()
-                        c_hora = raw[3].strip()
-                        respuesta_visible = f"¡LISTO {c_nombre}! ✅ Tu turno quedó confirmado para el {c_fecha} a las {c_hora} hs. Te esperamos en Barbería Z. ¡Nos vemos!"
-                    except:
-                        respuesta_visible = "¡LISTO! ✅ Tu turno quedó confirmado. ¡Te esperamos!"
 
-                # Reset estado tras confirmar y guardar
-                db.save_session_state(cliente, {})
+                if datos_cita:
+                    # ÉXITO: Cita guardada
+                    if match_cita:
+                        try:
+                            raw = match_cita.group(1).split('|')
+                            c_nombre = raw[0].strip().title()
+                            c_fecha = raw[2].strip()
+                            c_hora = raw[3].strip()
+                            respuesta_visible = f"¡LISTO {c_nombre}! ✅ Tu turno quedó confirmado para el {c_fecha} a las {c_hora} hs. Te esperamos en Barbería Z. ¡Nos vemos!"
+                        except:
+                            respuesta_visible = "¡LISTO! ✅ Tu turno quedó confirmado. ¡Te esperamos!"
+
+                    # Reset estado tras confirmar
+                    db.save_session_state(cliente, {})
+                else:
+                    # FALLO: procesar_cita devolvió None (Ocupado)
+                    respuesta_visible = "⚠️ Lo siento, ese turno se acaba de ocupar hace unos segundos. 😅 Por favor elige otro horario."
+                    # Mantenemos el estado para que el usuario pueda intentar otra hora inmediatamente
+                    # (Quizás borramos solo la hora de la intención?)
+                    if 'hora_intencion' in sesion['state']:
+                        del sesion['state']['hora_intencion']
+                        db.save_session_state(cliente, sesion['state'])
 
             return respuesta_visible
             
@@ -380,15 +388,22 @@ def procesar_cita(respuesta, telefono):
                 hora_raw = datos[3].strip()
                 if len(hora_raw) == 4 and ':' in hora_raw:
                     hora_raw = "0" + hora_raw
-                db.agregar_cita(
+
+                # Llamar a DB (Ahora retorna ID o None si falla)
+                cita_id = db.agregar_cita(
                     fecha=datos[2].strip(),
                     hora=hora_raw,
                     cliente_nombre=datos[0].strip(),
                     telefono=telefono,
                     servicio=datos[1].strip()
                 )
-                print(f"✅ CITA GUARDADA EN DB")
-                return datos # Retornar datos para uso en mensaje
+
+                if cita_id:
+                    print(f"✅ CITA GUARDADA EN DB (ID: {cita_id})")
+                    return datos # Retornar datos para uso en mensaje
+                else:
+                    print(f"🚫 FALLO AL GUARDAR CITA (Ocupado)")
+                    return None
     except Exception as e:
         print(f"❌ Error DB: {e}")
     return None

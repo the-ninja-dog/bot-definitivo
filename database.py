@@ -180,12 +180,21 @@ UBICACIÓN:
     # ==================== CITAS ====================
     
     def agregar_cita(self, fecha, hora, cliente_nombre, telefono='', servicio='Corte', total=0):
-        """Agrega una nueva cita con lógica de REAGENDAMIENTO ATÓMICO"""
+        """Agrega una nueva cita con validación estricta de DISPONIBILIDAD y REAGENDAMIENTO"""
         conn = self.get_connection()
         cursor = conn.cursor()
 
         try:
-            # 1. Buscar citas activas de este teléfono (Futuras o de hoy)
+            # 0. VALIDACIÓN ESTRICTA (Anti-Doble Turno)
+            cursor.execute('''
+                SELECT id FROM citas
+                WHERE fecha = ? AND hora = ? AND estado = 'Confirmado'
+            ''', (fecha, hora))
+            if cursor.fetchone():
+                print(f"🚫 RECHAZADO: El turno {fecha} {hora} ya está ocupado.")
+                return None # Indica fallo por ocupado
+
+            # 1. Buscar citas activas de este teléfono (Futuras o de hoy) para Reagendamiento
             # Solo si tenemos teléfono validado
             if telefono and len(telefono) > 5:
                 # Simplificado para evitar problemas de timezone en test/prod

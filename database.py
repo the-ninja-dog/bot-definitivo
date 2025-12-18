@@ -382,15 +382,44 @@ UBICACIÓN:
         conn = self.get_connection()
         cursor = self._get_cursor(conn)
 
-        cursor.execute(self._fmt_query('SELECT estado_json FROM sesiones_bot WHERE cliente_id = ?'), (cliente_id,))
+        # 1. Recuperar Estado con Timeout (15 min)
+        # Postgres uses NOW(), SQLite uses CURRENT_TIMESTAMP or datetime('now')
+        # We will fetch updated_at and check in Python to be safe across engines
+        cursor.execute(self._fmt_query('SELECT estado_json, updated_at FROM sesiones_bot WHERE cliente_id = ?'), (cliente_id,))
         row = cursor.fetchone()
-        state = {}
-        if row and row['estado_json']:
-            try:
-                state = json.loads(row['estado_json'])
-            except:
-                state = {}
 
+        state = {}
+        reset_needed = False
+
+        if row:
+            # Check timeout
+            last_update = row['updated_at']
+            if isinstance(last_update, str):
+                # SQLite usually returns string "YYYY-MM-DD HH:MM:SS"
+                try:
+                    last_update = datetime.datetime.strptime(last_update, "%Y-%m-%d %H:%M:%S")
+                except:
+                    last_update = datetime.datetime.now() # Fallback
+
+            # If postgres, it might be datetime object already
+
+            diff = datetime.datetime.now() - last_update
+            if diff.total_seconds() > 900: # 15 minutes
+                print(f"⏰ Sesión expirada para {cliente_id} (>15m). Reiniciando.")
+                reset_needed = True
+            elif row['estado_json']:
+                try:
+                    state = json.loads(row['estado_json'])
+                except:
+                    state = {}
+
+        if reset_needed:
+            # Clear state in DB
+            self.save_session_state(cliente_id, {})
+            # Return empty history implies "New Conversation" to the LLM context essentially
+            return {"state": {}, "history": []}
+
+        # 2. Recuperar Historial (Últimos 10 mensajes)
         cursor.execute(self._fmt_query('''
             SELECT es_bot, contenido
             FROM mensajes

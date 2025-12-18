@@ -75,6 +75,18 @@ def enviar_mensaje_wasender(to, text):
 # === MEMORIA DE ESTADO (CONVERSACIÓN + INTENCIÓN) ===
 # sesiones = {}  <-- Eliminado, ahora usamos DB
 
+# === HELPER: MAPA DE DÍAS (SOLUCIÓN TEMPORAL) ===
+def obtener_mapa_dias(dias=7):
+    """Genera un mapa explícito de fechas para que el LLM no se pierda"""
+    ahora = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=4)
+    mapa = []
+    dias_sem = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
+    for i in range(dias):
+        fecha = ahora + datetime.timedelta(days=i)
+        nombre = dias_sem[fecha.weekday()]
+        mapa.append(f"- {nombre} es {fecha.day}/{fecha.month} ({fecha.strftime('%Y-%m-%d')})")
+    return "\n".join(mapa)
+
 # === HELPER DISPONIBILIDAD INTELIGENTE ===
 def obtener_estado_agenda(dias=5):
     # Usar timezone UTC para evitar deprecation warning, luego restar 4 horas
@@ -289,11 +301,22 @@ def generar_respuesta_ia(mensaje, cliente, push_name=None):
     dia_semana_int = ahora.weekday()
     dia_semana = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'][dia_semana_int]
 
+    # Contexto de mapa de días para el LLM
+    mapa_dias = obtener_mapa_dias(7)
+
     print(f"🕒 SERVER TIME (UTC-4): {fecha_hoy} {hora_actual} ({dia_semana})")
 
     # Recuperar sesión desde DB (Persistencia)
     sesion = db.get_session(cliente)
     estado_actual = sesion['state']
+
+    # RESET MANUAL POR PALABRAS CLAVE (ZOMBIE KILLER)
+    msg_lower = mensaje.lower().strip()
+    if msg_lower in ['hola', 'inicio', 'menu', 'menú', 'buenas', 'comenzar']:
+        print(f"🧹 Reiniciando sesión para {cliente} (Keyword: {msg_lower})")
+        db.save_session_state(cliente, {})
+        sesion = db.get_session(cliente) # Recargar limpia
+        estado_actual = {}
 
     # AUTO-LEARN NAME from PushName if not known
     if not estado_actual.get('nombre') and push_name:
@@ -373,6 +396,9 @@ def generar_respuesta_ia(mensaje, cliente, push_name=None):
 
 === CONTEXTO TEMPORAL ===
 HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
+
+GUÍA DE FECHAS (Para entender "viernes", "lunes", etc):
+{mapa_dias}
 
 === MEMORIA DE ESTA CHARLA (DATOS YA OBTENIDOS) ===
 {contexto_memoria}

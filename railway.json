@@ -1,15 +1,9 @@
 {
   "build": {
-<<<<<<< HEAD
-    "command": "bash build.sh"
-  },
-  "start": "gunicorn -w 4 -b 0.0.0.0:$PORT api_server:app"
-=======
     "builder": "DOCKERFILE",
     "watchPatterns": ["**/*"]
   },
   "deploy": {
     "startCommand": ""
   }
->>>>>>> b23a026260ad094a3226be3ee6bd56b737a0c5fa
 }

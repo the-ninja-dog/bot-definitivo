@@ -1,24 +1,38 @@
-# ETAPA 1: Construir la Web App con Flutter
-FROM ghcr.io/cirruslabs/flutter:stable AS flutter-builder
+# Stage 1: Build Flutter Web
+FROM ghcr.io/cirruslabs/flutter:3.16.0 AS flutter-builder
+
 WORKDIR /app
 COPY . .
-RUN flutter pub get
-RUN flutter build web
 
-# ETAPA 2: Configurar Python para el Bot
+# Enable web support and build
+# Setting base-href to / because Flask serves it at root
+RUN flutter config --enable-web
+RUN flutter build web --release --base-href /
+
+# Stage 2: Python Backend with Static Files
 FROM python:3.11-slim
+
 WORKDIR /app
 
-# Instalar dependencias de Python
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar la Web App construida en la etapa 1 a la carpeta 'web'
-# ESTA ES LA MAGIA QUE ARREGLA EL 404
-COPY --from=flutter-builder /app/build/web ./web
-
-# Copiar el resto del código del Bot
+# Copy Python Backend code
 COPY . .
 
-# Comando de arranque
-CMD gunicorn -w 4 -b 0.0.0.0:$PORT api_server:app
+# Copy Built Flutter Web Assets from Stage 1
+# Renaming to 'web' to match Flask configuration and reduce confusion
+COPY --from=flutter-builder /app/build/web ./web
+
+# Env vars
+ENV PORT=5000
+EXPOSE 5000
+
+# Run
+CMD ["python", "api_server.py"]

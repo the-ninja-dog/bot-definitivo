@@ -14,16 +14,11 @@ from dotenv import load_dotenv
 # Cargar variables de entorno
 load_dotenv()
 
-<<<<<<< HEAD
-# Servir Flutter web desde build/web
-app = Flask(__name__, static_folder='build/web', static_url_path='')
-=======
 # Use absolute path for static folder to avoid CWD issues
 # UPDATE: Renaming to 'web' to match standard Flutter build output
 STATIC_FOLDER = os.path.join(os.getcwd(), 'web')
 # Disable default static routing to prevent conflicts
 app = Flask(__name__, static_folder=None)
->>>>>>> b23a026260ad094a3226be3ee6bd56b737a0c5fa
 CORS(app)
 
 # === API KEYS DE GROQ (ROTACIÓN) ===
@@ -152,8 +147,8 @@ def normalizar_hora_str(hora_raw):
     return None
 
 # === HELPER: DETECCIÓN DE CONFLICTOS ===
-def analizar_conflicto_horario(mensaje):
-    """Revisa si el usuario pide una hora específica que YA está ocupada"""
+def analizar_conflicto_horario(mensaje, estado_actual={}):
+    """Revisa si el usuario pide (o tiene intención de) una hora que YA está ocupada"""
     try:
         # 1. Determinar fecha (Hoy o Mañana)
         ahora = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=4)
@@ -162,35 +157,54 @@ def analizar_conflicto_horario(mensaje):
         msg_lower = mensaje.lower()
         if 'mañana' in msg_lower:
             target_date = ahora + datetime.timedelta(days=1)
-        elif 'lunes' in msg_lower or 'martes' in msg_lower:
-            # Si menciona un día, asumimos que el LLM lo manejará,
-            # o podríamos implementar lógica compleja.
-            # Por seguridad, si es explicito "mañana", chequeamos. Si es hoy (implícito), chequeamos.
-            pass
 
-        fecha_str = target_date.strftime('%Y-%m-%d')
+        # TODO: Soportar fechas del estado_actual si existen (ej. fecha_intencion)
+        if estado_actual.get('fecha_intencion'):
+            # Si el estado tiene fecha explicita, usémosla (simplificado, asume formato YYYY-MM-DD)
+            try:
+                # Validar formato
+                datetime.datetime.strptime(estado_actual['fecha_intencion'], '%Y-%m-%d')
+                fecha_str = estado_actual['fecha_intencion']
+            except:
+                fecha_str = target_date.strftime('%Y-%m-%d')
+        else:
+            fecha_str = target_date.strftime('%Y-%m-%d')
 
-        # 2. Extraer posibles horas del mensaje (Ej: "5", "17:00", "5 pm")
-        # Regex captura números 1-23 opcionalmente seguidos de :00-59
+        print(f"🔍 Analizando conflictos para fecha: {fecha_str}")
+
+        # 2. Identificar Horas Objetivo (Mensaje + Estado)
+        targets = []
+
+        # A) Desde el mensaje
         matches = re.findall(r'\b(\d{1,2})(?::(\d{2}))?\b', mensaje)
-
-        if not matches:
-            return None
-
-        citas = db.obtener_citas_por_fecha(fecha_str)
-        ocupadas = [c['hora'][:5] for c in citas] # ['17:00', '18:00']
-
-        alertas = []
         for m in matches:
             h_str = m[0]
             if m[1]: h_str += ":" + m[1]
-
             norm = normalizar_hora_str(h_str)
-            if norm and norm in ocupadas:
-                alertas.append(f"{norm} ({fecha_str})")
+            if norm: targets.append(norm)
+
+        # B) Desde el estado (Intención previa)
+        # Si el usuario dice "Seguro?" o "Confirma", valida la hora que ya tenemos.
+        if not targets and estado_actual.get('hora_intencion'):
+            targets.append(estado_actual['hora_intencion'])
+            print(f"   ↳ Usando hora de memoria: {estado_actual['hora_intencion']}")
+
+        if not targets:
+            return None
+
+        # 3. Consultar DB
+        citas = db.obtener_citas_por_fecha(fecha_str)
+        ocupadas = [c['hora'][:5] for c in citas]
+        print(f"   ↳ Ocupadas en DB: {ocupadas}")
+
+        alertas = []
+        for t in targets:
+            if t in ocupadas:
+                alertas.append(f"{t} ({fecha_str})")
 
         if alertas:
             lista_conflictos = ", ".join(alertas)
+            print(f"🚨 CONFLICTO DETECTADO: {lista_conflictos}")
             return f"""[ALERTA DE SISTEMA CRÍTICA]: El usuario preguntó por el horario: {lista_conflictos}.
             ESE HORARIO YA ESTÁ RESERVADO/OCUPADO en la base de datos.
             ⚠️ DEBES RESPONDER QUE NO ESTÁ DISPONIBLE y ofrecer otra hora cercana. NO CONFIRMES."""
@@ -302,8 +316,22 @@ def generar_respuesta_ia(mensaje, cliente, push_name=None):
     if estado_actual.get('servicio'):
         contexto_memoria += f"- SERVICIO: {estado_actual['servicio']}\n"
 
-    # === DETECCIÓN PROACTIVA DE CONFLICTOS (EMERGENCY FIX) ===
-    alerta_conflicto = analizar_conflicto_horario(mensaje)
+    # === DETECCIÓN PROACTIVA DE CONFLICTOS (HARD BLOCK) ===
+    # Si detectamos que el usuario pide algo ocupado, CORTAMOS aquí. No dejamos que el LLM alucine.
+    # Pasamos estado_actual para validar intenciones previas ("Confirmame")
+    alerta_conflicto = analizar_conflicto_horario(mensaje, estado_actual)
+    if alerta_conflicto:
+        # Extraer la hora del conflicto para el mensaje amigable
+        # El string de alerta tiene formato: "... horario: 17:00 (2025-12-18)..."
+        match_h = re.search(r'horario: ([\d:]+)', alerta_conflicto)
+        hora_ocupada = match_h.group(1) if match_h else "ese horario"
+
+        # Mensaje directo sin pasar por LLM
+        respuesta_directa = f"⚠️ Disculpa, justo se ocupó las {hora_ocupada}, tengo otros turnos libres. ¿Te sirve otro horario?"
+
+        # Guardar en historial para contexto
+        db.agregar_mensaje(cliente, respuesta_directa, es_bot=True)
+        return respuesta_directa
 
     # === LÓGICA DE ESTADOS DINÁMICA (STATE MACHINE) ===
     # Determinamos qué falta para guiar al LLM con una instrucción ÚNICA y CLARA.
@@ -411,7 +439,12 @@ HORARIO OFICIAL: 08:00 AM a 20:00 PM.
             db.save_session_state(cliente, nuevo_estado)
             
             # Limpiar bloque de memoria de la respuesta al usuario
+            # 1. Intentar limpieza estándar
             respuesta_visible = re.sub(r'\[MEMORIA\].*?\[/MEMORIA\]', '', respuesta, flags=re.DOTALL).strip()
+
+            # 2. Limpieza de emergencia (Tag sin cerrar)
+            if '[MEMORIA]' in respuesta_visible:
+                respuesta_visible = respuesta_visible.split('[MEMORIA]')[0].strip()
 
             if '[CITA]' in respuesta_visible and '[/CITA]' in respuesta_visible:
                 # Extraer datos de cita antes de limpiar
@@ -542,27 +575,6 @@ def wasender_webhook():
         print(f"❌ ERROR WEBHOOK: {str(e)}")
         return 'Error', 500
 
-<<<<<<< HEAD
-# === SERVIR FLUTTER WEB ===
-@app.route('/')
-def serve_flutter():
-    return send_from_directory(app.static_folder, 'index.html')
-
-@app.route('/<path:path>')
-def serve_flutter_files(path):
-    if path.startswith('api/') or path.startswith('wasender/'):
-        return jsonify({'error': 'Not found'}), 404
-    try:
-        return send_from_directory(app.static_folder, path)
-    except:
-        return send_from_directory(app.static_folder, 'index.html')
-
-@app.route('/api/status', methods=['GET'])
-def api_status():
-    return jsonify({'status': 'online', 'message': 'Bot WaSender Activo'})
-
-=======
->>>>>>> b23a026260ad094a3226be3ee6bd56b737a0c5fa
 @app.route('/api/stats', methods=['GET'])
 def api_stats():
     config = db.get_all_config()
@@ -646,11 +658,6 @@ def serve_static(path):
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
-    index_path = os.path.join(app.static_folder, 'index.html')
-    if os.path.exists(index_path):
-        print(f"✅ build/web/index.html encontrado: {index_path}")
-    else:
-        print(f"❌ build/web/index.html NO encontrado: {index_path}")
     print(f"🟢 Bot WaSender iniciado en puerto {port}")
 
     # DEBUG CRÍTICO: Ver qué hay en el disco

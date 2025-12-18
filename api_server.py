@@ -219,7 +219,7 @@ def generar_respuesta_ia(mensaje, cliente, push_name=None):
          # Filter pushname too
          if push_name.lower() not in NAME_BLACKLIST:
              print(f"👤 Auto-detectando nombre de WhatsApp: {push_name}")
-             estado_actual['nombre'] = push_name
+             estado_actual['nombre'] = push_name.title() # Title case fix
              # Guardamos inmediatamente para que el prompt lo use
              db.save_session_state(cliente, estado_actual)
 
@@ -227,7 +227,7 @@ def generar_respuesta_ia(mensaje, cliente, push_name=None):
 
     contexto_memoria = ""
     if estado_actual.get('nombre'):
-        contexto_memoria += f"- NOMBRE: {estado_actual['nombre']}\n"
+        contexto_memoria += f"- NOMBRE: {estado_actual['nombre'].title()}\n"
     if estado_actual.get('fecha_intencion'):
         contexto_memoria += f"- FECHA: {estado_actual['fecha_intencion']}\n"
     if estado_actual.get('hora_intencion'):
@@ -292,19 +292,24 @@ HORARIO OFICIAL: 08:00 AM a 20:00 PM.
 {instruccion_dinamica}
 
 === REGLAS DE ORO (LÓGICA) ===
-1. **VERIFICACIÓN ESTRICTA**: Antes de decir "no disponible", REVISA la lista 'DISPONIBILIDAD REAL'.
-   - Si el usuario pide una hora (ej: "17:00") y aparece en la lista [DISPONIBLE], **DI QUE SÍ**.
+1. **INTERPRETACIÓN DE HORAS (CRÍTICO)**:
+   - Si el usuario dice un número del 1 al 7, **ASUME QUE ES PM**. (Ej: "5" = 17:00, "2" = 14:00).
+   - Si dice 8, 9, 10, 11, ASUME AM (mañana).
+   - SIEMPRE usa formato 24h para verificar disponibilidad (ej: busca "17:00", no "5").
+
+2. **VERIFICACIÓN ESTRICTA**: Antes de decir "no disponible", REVISA la lista 'DISPONIBILIDAD REAL'.
+   - Si el usuario pide una hora (ej: "17:00" o "5") y aparece en la lista [DISPONIBLE], **DI QUE SÍ**.
    - Si NO está en la lista, di que no y ofrece las alternativas más cercanas.
    - NO alucines horarios ocupados si la lista dice que están libres.
 
-2. **GESTIÓN DE MEMORIA**: Al final de CADA respuesta, incluye SIEMPRE:
+3. **GESTIÓN DE MEMORIA**: Al final de CADA respuesta, incluye SIEMPRE:
    [MEMORIA]{{"nombre": "...", "fecha": "...", "hora": "...", "servicio": "..."}}[/MEMORIA]
    - Copia los datos de la MEMORIA anterior.
    - Agrega/Actualiza lo nuevo que diga el usuario.
    - "hora" debe ser en formato 24h (ej: 19:00).
    - REGLA DE ORO: Si la hora detectada es menor a 08:00 o mayor a 20:00, NO LA GUARDES en memoria (déjala vacía o null).
 
-3. **CONFIRMACIÓN FINAL**:
+4. **CONFIRMACIÓN FINAL**:
    Solo si el usuario confirma explícitamente y tienes todo:
    [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
 """
@@ -338,14 +343,25 @@ HORARIO OFICIAL: 08:00 AM a 20:00 PM.
             respuesta_visible = re.sub(r'\[MEMORIA\].*?\[/MEMORIA\]', '', respuesta, flags=re.DOTALL).strip()
 
             if '[CITA]' in respuesta_visible and '[/CITA]' in respuesta_visible:
-                procesar_cita(respuesta_visible, cliente)
-                respuesta_visible = re.sub(r'\[CITA\].*?\[/CITA\]', '', respuesta_visible).strip()
+                # Extraer datos de cita antes de limpiar
+                datos_cita = procesar_cita(respuesta_visible, cliente)
+
+                # BUGFIX: Limpieza de chat (Triple despedida)
+                # Si hay cita, forzamos un mensaje único y limpio.
+                match_cita = re.search(r'\[CITA\](.+?)\[/CITA\]', respuesta_visible)
+                if match_cita:
+                    # Intentar obtener datos bonitos para la respuesta
+                    try:
+                        raw = match_cita.group(1).split('|')
+                        c_nombre = raw[0].strip().title()
+                        c_fecha = raw[2].strip()
+                        c_hora = raw[3].strip()
+                        respuesta_visible = f"¡LISTO {c_nombre}! ✅ Tu turno quedó confirmado para el {c_fecha} a las {c_hora} hs. Te esperamos en Barbería Z. ¡Nos vemos!"
+                    except:
+                        respuesta_visible = "¡LISTO! ✅ Tu turno quedó confirmado. ¡Te esperamos!"
 
                 # Reset estado tras confirmar y guardar
                 db.save_session_state(cliente, {})
-
-                if not respuesta_visible:
-                    respuesta_visible = "✅ ¡Listo! Tu cita ha sido agendada. ¡Te esperamos!"
 
             return respuesta_visible
             
@@ -372,8 +388,10 @@ def procesar_cita(respuesta, telefono):
                     servicio=datos[1].strip()
                 )
                 print(f"✅ CITA GUARDADA EN DB")
+                return datos # Retornar datos para uso en mensaje
     except Exception as e:
         print(f"❌ Error DB: {e}")
+    return None
 
 # === WEBHOOK WASENDER (GENÉRICO) ===
 @app.route("/wasender/webhook", methods=['POST'])

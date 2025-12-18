@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from groq import Groq
 import datetime
@@ -14,7 +14,8 @@ from dotenv import load_dotenv
 # Cargar variables de entorno
 load_dotenv()
 
-app = Flask(__name__)
+# Servir Flutter web desde build/web
+app = Flask(__name__, static_folder='build/web', static_url_path='')
 CORS(app)
 
 # === API KEYS DE GROQ (ROTACIÓN) ===
@@ -470,9 +471,22 @@ def wasender_webhook():
         print(f"❌ ERROR WEBHOOK: {str(e)}")
         return 'Error', 500
 
-# [Resto de rutas igual...]
-@app.route('/', methods=['GET'])
-def home():
+# === SERVIR FLUTTER WEB ===
+@app.route('/')
+def serve_flutter():
+    return send_from_directory(app.static_folder, 'index.html')
+
+@app.route('/<path:path>')
+def serve_flutter_files(path):
+    if path.startswith('api/') or path.startswith('wasender/'):
+        return jsonify({'error': 'Not found'}), 404
+    try:
+        return send_from_directory(app.static_folder, path)
+    except:
+        return send_from_directory(app.static_folder, 'index.html')
+
+@app.route('/api/status', methods=['GET'])
+def api_status():
     return jsonify({'status': 'online', 'message': 'Bot WaSender Activo'})
 
 @app.route('/api/stats', methods=['GET'])
@@ -533,5 +547,10 @@ def toggle_bot():
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
+    index_path = os.path.join(app.static_folder, 'index.html')
+    if os.path.exists(index_path):
+        print(f"✅ build/web/index.html encontrado: {index_path}")
+    else:
+        print(f"❌ build/web/index.html NO encontrado: {index_path}")
     print(f"🟢 Bot WaSender iniciado en puerto {port}")
     app.run(host='0.0.0.0', port=port, debug=False)

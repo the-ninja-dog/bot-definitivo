@@ -1,6 +1,4 @@
 {
-  "build": [
-    "flutter build web --release"
-  ],
+  "build": "flutter build web --release",
   "start": "gunicorn -w 4 -b 0.0.0.0:$PORT api_server:app"
 }

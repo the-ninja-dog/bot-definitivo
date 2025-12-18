@@ -93,10 +93,10 @@ def obtener_estado_agenda(dias=5):
     ahora = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=4)
     resumen = []
 
-    # Horas posibles de 08:00 a 19:00 (Cierre 20:00)
+    # Horas posibles de 09:00 a 19:00 (Cierre 20:00)
     # Excluyendo almuerzo 12:00
-    # FIX: Opening at 08:00 AM as per new instruction
-    horas_totales = [f"{h:02d}:00" for h in range(8, 20) if h != 12]
+    # FIX: Opening at 09:00 AM as per updated instruction
+    horas_totales = [f"{h:02d}:00" for h in range(9, 20) if h != 12]
 
     for i in range(dias):
         fecha_obj = ahora + datetime.timedelta(days=i)
@@ -292,7 +292,12 @@ def generar_respuesta_ia(mensaje, cliente, push_name=None):
     
     config = db.get_all_config()
     nombre_negocio = config.get('nombre_negocio', 'Barbería Z')
-    instrucciones_negocio = config.get('instrucciones', 'Horario: 8am-8pm. Corte $10.')
+    instrucciones_negocio = config.get('instrucciones', """
+    HORARIOS: Lunes a Sábado 09:00 - 20:00. Almuerzo 12:00.
+    PRECIOS:
+    - Normal: 40.000 Gs.
+    - FIESTAS (23, 24, 30, 31 Diciembre): 60.000 Gs.
+    """)
     
     # Cálculo robusto de fecha/hora (UTC-4)
     ahora = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=4)
@@ -409,7 +414,7 @@ GUÍA DE FECHAS (Para entender "viernes", "lunes", etc):
 
 === INSTRUCCIONES DEL NEGOCIO ===
 {instrucciones_negocio}
-HORARIO OFICIAL: 08:00 AM a 20:00 PM.
+HORARIO OFICIAL: 09:00 AM a 20:00 PM. (Almuerzo 12:00 - 13:00 CERRADO)
 
 === OBJETIVO ACTUAL (PRIORIDAD MÁXIMA) ===
 {instruccion_dinamica}
@@ -432,7 +437,7 @@ HORARIO OFICIAL: 08:00 AM a 20:00 PM.
    - Copia los datos de la MEMORIA anterior.
    - Agrega/Actualiza lo nuevo que diga el usuario.
    - "hora" debe ser en formato 24h (ej: 19:00).
-   - REGLA DE ORO: Si la hora detectada es menor a 08:00 o mayor a 20:00, NO LA GUARDES en memoria (déjala vacía o null).
+   - REGLA DE ORO: Si la hora detectada es menor a 09:00 o mayor a 20:00, NO LA GUARDES en memoria (déjala vacía o null).
 
 4. **CONFIRMACIÓN FINAL**:
    Solo si el usuario confirma explícitamente y tienes todo:
@@ -465,12 +470,8 @@ HORARIO OFICIAL: 08:00 AM a 20:00 PM.
             db.save_session_state(cliente, nuevo_estado)
             
             # Limpiar bloque de memoria de la respuesta al usuario
-            # 1. Intentar limpieza estándar
-            respuesta_visible = re.sub(r'\[MEMORIA\].*?\[/MEMORIA\]', '', respuesta, flags=re.DOTALL).strip()
-
-            # 2. Limpieza de emergencia (Tag sin cerrar)
-            if '[MEMORIA]' in respuesta_visible:
-                respuesta_visible = respuesta_visible.split('[MEMORIA]')[0].strip()
+            # Limpieza NUCLEAR: Eliminar todo desde [MEMORIA] hasta el final
+            respuesta_visible = re.sub(r'\[MEMORIA\].*', '', respuesta, flags=re.DOTALL).strip()
 
             if '[CITA]' in respuesta_visible and '[/CITA]' in respuesta_visible:
                 # Extraer datos de cita antes de limpiar

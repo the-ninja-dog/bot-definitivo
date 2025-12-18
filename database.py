@@ -153,14 +153,13 @@ class Database:
 - NO seas robótico repitiendo listas largas si ya estamos enfocados en una hora.
 
 HORARIOS:
-- Lunes a Sábado: 08:00 a 20:00 (Último turno 19:00).
+- Lunes a Sábado: 09:00 a 20:00 (Último turno 19:00).
 - Domingo: CERRADO.
 - Almuerzo: 12:00 a 13:00 (CERRADO).
 
 PRECIOS:
-- Corte: $10
-- Barba: $5
-- Corte + Barba: $12
+- Normal: 40.000 Gs.
+- FIESTAS (23, 24, 30, 31 Diciembre): 60.000 Gs.
 
 UBICACIÓN:
 - Av. Principal 123, Centro."""

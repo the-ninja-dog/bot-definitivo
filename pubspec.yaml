@@ -1,0 +1,25 @@
+name: barber_admin_app
+description: Panel de control Cyberpunk para Barberia Z.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # --- LIBRERÍAS DE CONEXIÓN Y ESTILO ---
+  dio: ^5.0.0            # Para hablar con tu api_server.py
+  intl: ^0.18.0          # Para manejar fechas y horas
+  google_fonts: ^6.0.0   # Tipografía estilo Hacker/Cyberpunk
+  flutter_animate: ^4.0.0 # Animaciones futuristas
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^2.0.0
+
+flutter:
+  uses-material-design: true

@@ -1,0 +1,9 @@
+whatsapp_session/
+__pycache__/
+*.pyc
+.env
+.git
+node_modules/
+build/
+dist/
+.DS_Store

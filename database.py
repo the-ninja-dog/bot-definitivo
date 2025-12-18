@@ -180,26 +180,53 @@ UBICACIÓN:
     # ==================== CITAS ====================
     
     def agregar_cita(self, fecha, hora, cliente_nombre, telefono='', servicio='Corte', total=0):
-        """Agrega una nueva cita"""
+        """Agrega una nueva cita con lógica de REAGENDAMIENTO ATÓMICO"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO citas (fecha, hora, cliente_nombre, telefono, servicio, estado)
-            VALUES (?, ?, ?, ?, ?, 'Confirmado')
-        ''', (fecha, hora, cliente_nombre, telefono, servicio))
-        conn.commit()
-        cita_id = cursor.lastrowid
-        conn.close()
-        return cita_id
+
+        try:
+            # 1. Buscar citas activas de este teléfono (Futuras o de hoy)
+            # Solo si tenemos teléfono validado
+            if telefono and len(telefono) > 5:
+                # Simplificado para evitar problemas de timezone en test/prod
+                # Busca citas desde HOY en adelante
+                cursor.execute('''
+                    SELECT id FROM citas
+                    WHERE telefono = ?
+                    AND estado = 'Confirmado'
+                    AND fecha >= date('now')
+                ''', (telefono,))
+
+                citas_activas = cursor.fetchall()
+                for cita in citas_activas:
+                    print(f"🔄 REAGENDANDO: Cancelando cita anterior ID {cita['id']} para {telefono}")
+                    cursor.execute("UPDATE citas SET estado = 'Cancelado' WHERE id = ?", (cita['id'],))
+
+            # 2. Insertar nueva cita
+            cursor.execute('''
+                INSERT INTO citas (fecha, hora, cliente_nombre, telefono, servicio, estado)
+                VALUES (?, ?, ?, ?, ?, 'Confirmado')
+            ''', (fecha, hora, cliente_nombre, telefono, servicio))
+
+            cita_id = cursor.lastrowid
+            conn.commit()
+            return cita_id
+
+        except Exception as e:
+            conn.rollback()
+            print(f"❌ Error en agregar_cita: {e}")
+            raise e
+        finally:
+            conn.close()
     
     def obtener_citas_por_fecha(self, fecha):
-        """Obtiene todas las citas de una fecha específica"""
+        """Obtiene todas las citas CONFIRMADAS de una fecha específica"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT id, fecha, hora, cliente_nombre, servicio, estado
+            SELECT id, fecha, hora, cliente_nombre, telefono, servicio, estado
             FROM citas 
-            WHERE fecha = ?
+            WHERE fecha = ? AND estado = 'Confirmado'
             ORDER BY hora
         ''', (fecha,))
         rows = cursor.fetchall()
@@ -207,12 +234,13 @@ UBICACIÓN:
         return [dict(row) for row in rows]
     
     def obtener_todas_las_citas(self):
-        """Obtiene todas las citas"""
+        """Obtiene todas las citas CONFIRMADAS"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             SELECT id, fecha, hora, cliente_nombre, servicio, estado
             FROM citas 
+            WHERE estado = 'Confirmado'
             ORDER BY fecha, hora
         ''')
         rows = cursor.fetchall()
@@ -236,11 +264,19 @@ UBICACIÓN:
         conn.close()
     
     def contar_citas_hoy(self):
-        """Cuenta las citas de hoy"""
+        """Cuenta las citas activas de hoy"""
         hoy = datetime.date.today().isoformat()
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) as total FROM citas WHERE fecha = ?', (hoy,))
+
+        # Filtro estricto: Solo 'Confirmado'
+        # Podríamos usar != 'Cancelado', pero 'Confirmado' es más seguro si hay otros estados.
+        cursor.execute('''
+            SELECT COUNT(*) as total FROM citas
+            WHERE fecha = ?
+            AND estado = 'Confirmado'
+        ''', (hoy,))
+
         row = cursor.fetchone()
         conn.close()
         return row['total'] if row else 0

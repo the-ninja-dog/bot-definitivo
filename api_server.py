@@ -29,6 +29,9 @@ current_key_index = 0
 WASENDER_URL = "https://wasenderapi.com/api/send-message"
 WASENDER_TOKEN = "23b0342bd631a643edbb96b4c9c2d29ae77fff50c1597fed8d3e92eeef5b6ebd"
 
+# LISTA NEGRA DE NOMBRES
+NAME_BLACKLIST = ['bro', 'man', 'kp', 'kape', 'amigo', 'hola', 'buenas', 'que tal', 'haupei', 'info', 'precio', 'sera']
+
 def enviar_mensaje_wasender(to, text):
     """Envía mensaje usando WaSender con manejo de errores y throttling"""
     # 1. Throttling (Seguridad)
@@ -74,9 +77,10 @@ def obtener_estado_agenda(dias=5):
     ahora = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=4)
     resumen = []
 
-    # Horas posibles de 09:00 a 19:00 (Cierre 20:00)
+    # Horas posibles de 08:00 a 19:00 (Cierre 20:00)
     # Excluyendo almuerzo 12:00
-    horas_totales = [f"{h:02d}:00" for h in range(9, 20) if h != 12]
+    # FIX: Opening at 08:00 AM as per new instruction
+    horas_totales = [f"{h:02d}:00" for h in range(8, 20) if h != 12]
 
     for i in range(dias):
         fecha_obj = ahora + datetime.timedelta(days=i)
@@ -120,36 +124,54 @@ def procesar_memoria_ia(respuesta, estado_actual):
             json_str = json_str.replace("'", '"')
             datos = json.loads(json_str)
 
-            # Actualizar campos si no están vacíos
-            if datos.get('nombre'): nuevo_estado['nombre'] = datos['nombre']
+            # Actualizar campos si no están vacíos y son válidos
+
+            # 1. Validación de NOMBRE (Blacklist)
+            if datos.get('nombre'):
+                nombre_candidato = str(datos['nombre']).strip()
+                if nombre_candidato.lower() not in NAME_BLACKLIST:
+                    nuevo_estado['nombre'] = nombre_candidato
+                else:
+                    print(f"⚠️ Nombre '{nombre_candidato}' en lista negra. Ignorando.")
+
             if datos.get('fecha'): nuevo_estado['fecha_intencion'] = datos['fecha']
             if datos.get('servicio'): nuevo_estado['servicio'] = datos['servicio']
 
-            # Lógica de corrección de HORA (12h -> 24h) y VALIDACIÓN DE RANGO
+            # 2. Lógica de corrección de HORA (AM/PM) y RANGO
             if datos.get('hora'):
                 hora_raw = str(datos['hora']).replace(':', '').strip()
                 hora_final = datos['hora']
 
-                # 1. Normalización (1-8 -> PM)
-                if hora_raw.isdigit():
-                    h_int = int(hora_raw)
-                    if 1 <= h_int <= 8:
-                        hora_final = f"{h_int + 12}:00"
-                elif ':' in datos['hora']:
-                    parts = datos['hora'].split(':')
-                    try:
-                        h_int = int(parts[0])
-                        if 1 <= h_int <= 8:
-                            hora_final = f"{h_int + 12}:{parts[1]}"
-                    except:
-                        pass
+                # REGLA DE INFERENCIA DE HORA (1-7 -> PM, 8-11 -> AM)
+                h_int = -1
+                minutes_str = "00"
 
-                # 2. Validación de Rango (09:00 - 20:00)
+                if ':' in datos['hora']:
+                    try:
+                        parts = datos['hora'].split(':')
+                        h_int = int(parts[0])
+                        minutes_str = parts[1]
+                    except: pass
+                elif hora_raw.isdigit():
+                    h_int = int(hora_raw)
+
+                if h_int != -1:
+                    # 1 <= h <= 7 -> PM (13-19)
+                    if 1 <= h_int <= 7:
+                        hora_final = f"{h_int + 12}:{minutes_str}"
+                    # 8 <= h <= 11 -> AM (8-11) - Se queda igual (o formatea)
+                    elif 8 <= h_int <= 11:
+                         hora_final = f"{h_int:02d}:{minutes_str}"
+                    # Si ya es militar (13+), se queda igual
+
+                # 3. Validación de Rango (08:00 - 20:00)
                 try:
                     h_check = int(hora_final.split(':')[0])
-                    if h_check < 9 or h_check >= 20:
+                    # Abierto de 8 a 20. Última cita probable 19:00.
+                    # Si es >= 20, está cerrado. Si es < 8, cerrado.
+                    if h_check < 8 or h_check >= 20:
                         # Si está fuera de rango, NO lo guardamos (o lo borramos si existía)
-                        print(f"⚠️ Hora {hora_final} fuera de rango (9-20). Ignorando.")
+                        print(f"⚠️ Hora {hora_final} fuera de rango (8-20). Ignorando.")
                         if 'hora_intencion' in nuevo_estado:
                             del nuevo_estado['hora_intencion']
                     else:
@@ -165,7 +187,7 @@ def procesar_memoria_ia(respuesta, estado_actual):
     return nuevo_estado
 
 # === BOT LOGIC ===
-def generar_respuesta_ia(mensaje, cliente):
+def generar_respuesta_ia(mensaje, cliente, push_name=None):
     global current_key_index
     
     bot_encendido = db.get_config('bot_encendido', 'true')
@@ -177,7 +199,7 @@ def generar_respuesta_ia(mensaje, cliente):
     
     config = db.get_all_config()
     nombre_negocio = config.get('nombre_negocio', 'Barbería Z')
-    instrucciones_negocio = config.get('instrucciones', 'Horario: 9am-6pm. Corte $10.')
+    instrucciones_negocio = config.get('instrucciones', 'Horario: 8am-8pm. Corte $10.')
     
     # Cálculo robusto de fecha/hora (UTC-4)
     ahora = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=4)
@@ -191,6 +213,16 @@ def generar_respuesta_ia(mensaje, cliente):
     # Recuperar sesión desde DB (Persistencia)
     sesion = db.get_session(cliente)
     estado_actual = sesion['state']
+
+    # AUTO-LEARN NAME from PushName if not known
+    if not estado_actual.get('nombre') and push_name:
+         # Filter pushname too
+         if push_name.lower() not in NAME_BLACKLIST:
+             print(f"👤 Auto-detectando nombre de WhatsApp: {push_name}")
+             estado_actual['nombre'] = push_name
+             # Guardamos inmediatamente para que el prompt lo use
+             db.save_session_state(cliente, estado_actual)
+
     estado_agenda = obtener_estado_agenda(5)
 
     contexto_memoria = ""
@@ -223,19 +255,20 @@ def generar_respuesta_ia(mensaje, cliente):
     elif len(datos_faltantes) > 0:
         # 2. PROCESO (Faltan datos): Pedir lo que falta.
         faltan_str = ", ".join(datos_faltantes)
+        # COPY UX MEJORADO
         instruccion_dinamica = f"""
         OBJETIVO: COMPLETAR DATOS ({faltan_str}).
         - YA TENEMOS algunos datos (ver MEMORIA). NO LOS VUELVAS A PEDIR.
         - SOLO PREGUNTA por: {faltan_str}.
-        - IMPORTANTE: NO vuelvas a mostrar la lista de horarios disponibles. Ya estamos negociando un turno específico.
-        - Sé directo y breve.
+        - IMPORTANTE: NO vuelvas a mostrar la lista de horarios disponibles.
+        - Si falta SERVICIO, di: "¡Dale! Para agendarte bien, contame qué te querés hacer: ¿Solo el corte, un retoque de barba, o el servicio completo (cejas incluidas)?"
         """
     else:
         # 3. COMPLETO: Confirmar.
         instruccion_dinamica = """
         OBJETIVO: CONFIRMAR CITA.
         - Tienes TODOS los datos.
-        - Di: "Perfecto [Nombre], ¿te agendo el [Servicio] para el [Fecha] a las [Hora]?"
+        - Di: "Perfecto [Nombre], te anoto para el [Fecha] a las [Hora] hs entonces. ¿Te confirmo el turno?"
         - Si responde SÍ/CONFIRMO: Genera el código [CITA]...[/CITA].
         """
 
@@ -253,6 +286,7 @@ HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
 
 === INSTRUCCIONES DEL NEGOCIO ===
 {instrucciones_negocio}
+HORARIO OFICIAL: 08:00 AM a 20:00 PM.
 
 === OBJETIVO ACTUAL (PRIORIDAD MÁXIMA) ===
 {instruccion_dinamica}
@@ -268,16 +302,12 @@ HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
    - Copia los datos de la MEMORIA anterior.
    - Agrega/Actualiza lo nuevo que diga el usuario.
    - "hora" debe ser en formato 24h (ej: 19:00).
-   - REGLA DE ORO: Si la hora detectada es menor a 09:00 o mayor a 20:00, NO LA GUARDES en memoria (déjala vacía o null).
+   - REGLA DE ORO: Si la hora detectada es menor a 08:00 o mayor a 20:00, NO LA GUARDES en memoria (déjala vacía o null).
 
 3. **CONFIRMACIÓN FINAL**:
    Solo si el usuario confirma explícitamente y tienes todo:
    [CITA]Nombre|Servicio|YYYY-MM-DD|HH:MM[/CITA]
 """
-
-    # El mensaje del usuario YA fue guardado en DB por wasender_webhook -> db.agregar_mensaje
-    # Pero si llamamos a esta función desde otro lado, aseguramos que la "history" en sesion tenga el último mensaje
-    # Nota: db.get_session ya trae los últimos mensajes INCLUYENDO el que acabamos de recibir si se guardó antes.
 
     mensajes = [{"role": "system", "content": system_prompt}]
     mensajes.extend(sesion['history'])
@@ -296,7 +326,6 @@ HOY ES: {dia_semana} {fecha_hoy}, {hora_actual}
             print(f"✅ GROQ respondió: {respuesta[:50]}...")
 
             # Guardar respuesta del bot en el historial (DB)
-            # El mensaje original (con [MEMORIA]...) se guarda para contexto, pero al usuario se le muestra limpio
             db.agregar_mensaje(cliente, respuesta, es_bot=True)
 
             # Procesar Memoria Oculta
@@ -358,20 +387,20 @@ def wasender_webhook():
 
         print(f"📩 WEBHOOK RAW: {data}")
         
-        # Lógica de parsing flexible (Adaptar según llegue el JSON real)
-        # Asumimos estructura común: {'data': {'message': '...', 'from': '...'}} o directa
+        # Lógica de parsing flexible
         mensaje = ""
         remitente = ""
+        push_name = None
         
         # Caso 1: Estructura plana
         if 'message' in data and 'from' in data:
             mensaje = data['message']
             remitente = data['from']
-        # Caso 2: Estructura WaSender (según logs recientes)
+        # Caso 2: Estructura WaSender
         elif 'data' in data and 'messages' in data['data']:
             msg_data = data['data']['messages'][0] if isinstance(data['data']['messages'], list) else data['data']['messages']
 
-            # Extracción del mensaje (Prioridad: messageBody -> conversation -> text)
+            # Extracción del mensaje
             mensaje = msg_data.get('messageBody')
             if not mensaje:
                  contenido_msg = msg_data.get('message', {})
@@ -379,6 +408,9 @@ def wasender_webhook():
 
             # Extracción del remitente
             remitente = msg_data.get('remoteJid') or msg_data.get('key', {}).get('remoteJid')
+
+            # Extracción del PushName (Nombre Perfil)
+            push_name = msg_data.get('pushName')
 
         # Caso 3: Estructura anidada genérica (fallback)
         elif 'data' in data:
@@ -389,19 +421,15 @@ def wasender_webhook():
             print("⚠️ No se pudo extraer mensaje/remitente del JSON")
             return 'OK', 200
 
-        # Limpiar remitente (quitar @c.us si existe)
+        # Limpiar remitente
         remitente = remitente.replace('@c.us', '').replace('+', '')
         
         # Procesar con IA
         db.agregar_mensaje(remitente, mensaje, es_bot=False)
-        respuesta = generar_respuesta_ia(mensaje, remitente)
+        respuesta = generar_respuesta_ia(mensaje, remitente, push_name=push_name)
         
         if respuesta:
-            # ENVIAR RESPUESTA VÍA API WASENDER
-            # Nota: 'respuesta' ya es la versión limpia (sin [MEMORIA]) porque generar_respuesta_ia devuelve eso
             exito = enviar_mensaje_wasender(remitente, respuesta)
-            # El mensaje YA se guardó en generar_respuesta_ia con el bloque de memoria para contexto futuro
-            # No lo guardamos de nuevo aquí
         
         return 'OK', 200
         
@@ -409,12 +437,11 @@ def wasender_webhook():
         print(f"❌ ERROR WEBHOOK: {str(e)}")
         return 'Error', 500
 
-# === RUTAS API FRONTEND (MANTENIDAS) ===
+# [Resto de rutas igual...]
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({'status': 'online', 'message': 'Bot WaSender Activo'})
 
-# [Resto de rutas /api/stats, /api/citas se mantienen igual que antes]
 @app.route('/api/stats', methods=['GET'])
 def api_stats():
     config = db.get_all_config()

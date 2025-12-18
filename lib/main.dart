@@ -576,8 +576,8 @@ class _AgendaTabState extends State<AgendaTab> {
   List<Widget> _buildTimeSlots() {
     List<Widget> slots = [];
     
-    // Configuración horario: 09:00 a 20:00 (Cierre a las 20:00, último turno 19:00)
-    DateTime startTime = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day, 9, 0);
+    // Configuración horario: 08:00 a 20:00 (Cierre a las 20:00, último turno 19:00)
+    DateTime startTime = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day, 8, 0);
     DateTime endTime = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day, 20, 0);
     Duration step = const Duration(minutes: 60); // Slots de 1 hora
 

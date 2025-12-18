@@ -1,6 +1,6 @@
 {
   "build": {
-    "command": "flutter build web --release"
+    "command": "bash build.sh"
   },
   "start": "gunicorn -w 4 -b 0.0.0.0:$PORT api_server:app"
 }

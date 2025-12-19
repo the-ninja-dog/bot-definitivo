@@ -1,465 +1,255 @@
-# -*- coding: utf-8 -*-
-"""
-BASE DE DATOS PARA BOT DE BARBERÍA
-==========================================
-Maneja: clientes, citas, conversaciones, configuración
-Soporta: SQLite (Local) y PostgreSQL (Cloud/Railway)
-"""
-
 import sqlite3
 import datetime
 import json
 import os
+import time
 
-# Importar psycopg2 solo si está disponible
-try:
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
-    HAS_POSTGRES = True
-except ImportError:
-    HAS_POSTGRES = False
-
-DATABASE_FILE = "barberia.db"
+# Nombre de la DB
+DB_NAME = "barberia.db"
 
 class Database:
-    def __init__(self, db_file=DATABASE_FILE):
-        self.db_file = db_file
-        self.db_url = os.environ.get('DATABASE_URL')
-        self.is_postgres = bool(self.db_url and HAS_POSTGRES)
-        self.init_database()
+    def __init__(self):
+        self.db_path = os.path.join(os.getcwd(), DB_NAME)
+        self.init_db()
 
-        if self.is_postgres:
-            print("🚀 [DB] Conectado a PostgreSQL (Cloud)")
-        else:
-            print(f"📂 [DB] Usando SQLite Local: {self.db_file}")
-    
     def get_connection(self):
-        """Obtiene conexión a la base de datos (SQLite o Postgres)"""
-        if self.is_postgres:
-            try:
-                conn = psycopg2.connect(self.db_url)
-                return conn
-            except Exception as e:
-                print(f"❌ Error conectando a Postgres: {e}")
-                # Fallback o crash? Crash es mejor en prod.
-                raise e
-        else:
-            conn = sqlite3.connect(self.db_file)
-            conn.row_factory = sqlite3.Row  # Para acceder por nombre de columna
-            return conn
+        """Crea una conexión a la base de datos"""
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
 
-    def _get_cursor(self, conn):
-        if self.is_postgres:
-            return conn.cursor(cursor_factory=RealDictCursor)
-        else:
-            return conn.cursor()
-
-    def _fmt_query(self, query):
-        """Reemplaza placeholders '?' de SQLite por '%s' de Postgres si es necesario"""
-        if self.is_postgres:
-            return query.replace('?', '%s')
-        return query
-    
-    def init_database(self):
-        """Crea las tablas si no existen"""
+    def init_db(self):
+        """Inicializa tablas y carga datos del video"""
         conn = self.get_connection()
-        cursor = conn.cursor() # Usar cursor normal para DDL
-
-        # Definir tipos de PK
-        pk_type = "SERIAL PRIMARY KEY" if self.is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        cursor = conn.cursor()
         
-        # Tabla de configuración
-        cursor.execute(self._fmt_query(f'''
-            CREATE TABLE IF NOT EXISTS configuracion (
+        # 1. Tabla Citas
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS citas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cliente TEXT NOT NULL,
+                telefono TEXT,
+                fecha TEXT NOT NULL,
+                hora TEXT NOT NULL,
+                servicio TEXT,
+                estado TEXT DEFAULT 'Confirmado',
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # 2. Tabla Configuración
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS config (
                 clave TEXT PRIMARY KEY,
                 valor TEXT
             )
-        '''))
-        
-        # Tabla de clientes
-        cursor.execute(self._fmt_query(f'''
-            CREATE TABLE IF NOT EXISTS clientes (
-                id {pk_type},
-                nombre TEXT NOT NULL,
-                telefono TEXT,
-                creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        '''))
-        
-        # Tabla de citas
-        cursor.execute(self._fmt_query(f'''
-            CREATE TABLE IF NOT EXISTS citas (
-                id {pk_type},
-                cliente_id INTEGER,
-                cliente_nombre TEXT,
-                telefono TEXT,
-                fecha DATE NOT NULL,
-                hora TIME NOT NULL,
-                servicio TEXT DEFAULT 'Corte',
-                total REAL DEFAULT 0,
-                estado TEXT DEFAULT 'Confirmado',
-                creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                -- FK omitida por simplicidad en migración cruzada, pero idealmente:
-                -- FOREIGN KEY (cliente_id) REFERENCES clientes(id)
-            )
-        '''))
+        ''')
 
-        # MIGRACIÓN SEGURA: Intentar añadir columna telefono si no existe
-        # Nota: 'ALTER TABLE' es estándar, pero 'ADD COLUMN' varía ligeramente.
-        # SQLite/Postgres soportan 'ADD COLUMN'.
-        try:
-            cursor.execute('ALTER TABLE citas ADD COLUMN telefono TEXT')
-            conn.commit()
-        except Exception:
-            conn.rollback() # Ignorar si ya existe
-
-        # Tabla de conversaciones (historial por chat)
-        cursor.execute(self._fmt_query(f'''
-            CREATE TABLE IF NOT EXISTS conversaciones (
-                id {pk_type},
-                cliente_nombre TEXT NOT NULL,
-                estado TEXT DEFAULT 'activa',
-                ultimo_mensaje TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                cita_confirmada INTEGER DEFAULT 0
-            )
-        '''))
-        
-        # Tabla de mensajes (historial de cada conversación)
-        cursor.execute(self._fmt_query(f'''
+        # 3. Tabla Mensajes (Historial Chat)
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS mensajes (
-                id {pk_type},
-                conversacion_id INTEGER,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 cliente_nombre TEXT,
-                es_bot INTEGER DEFAULT 0,
                 contenido TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                es_bot INTEGER DEFAULT 0,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
-        '''))
+        ''')
 
-        # Tabla de SESIONES BOT (Persistencia de Estado)
-        cursor.execute(self._fmt_query('''
+        # 4. Tabla Sesiones (Memoria IA)
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS sesiones_bot (
                 cliente_id TEXT PRIMARY KEY,
                 estado_json TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
-        '''))
-
-        # NUEVAS INSTRUCCIONES POR DEFECTO
-        instrucciones_default = """PERSONALIDAD:
-- Eres eficiente y natural.
-- Si el cliente saluda sin más, ofrece los horarios libres.
-- Si el cliente ya pide una hora concreta, responde DIRECTAMENTE a eso (sí/no) y pide lo que falte.
-- NO seas robótico repitiendo listas largas si ya estamos enfocados en una hora.
-
-HORARIOS:
-- Lunes a Sábado: 09:00 a 20:00 (Último turno 19:00).
-- Domingo: CERRADO.
-- Almuerzo: 12:00 a 13:00 (CERRADO).
-
-PRECIOS:
-- Normal: 40.000 Gs.
-- FIESTAS (23, 24, 30, 31 Diciembre): 60.000 Gs.
-
-UBICACIÓN:
-- Av. Principal 123, Centro."""
-
-        # Configuración por defecto
-        # Upsert en Postgres es diferente (ON CONFLICT), en SQLite (INSERT OR IGNORE).
-        # Vamos a usar un try/except simple para el insert inicial.
-        try:
-            cursor.execute(self._fmt_query('''
-                INSERT INTO configuracion (clave, valor) VALUES ('nombre_negocio', 'Barbería Z')
-            '''))
-            conn.commit()
-        except Exception:
-            conn.rollback()
-
-        # Insertar resto si no existen
-        keys = {
-            'api_key': '',
-            'bot_encendido': 'true',
-            'instrucciones': instrucciones_default,
-            'hora_inicio': '9',
-            'hora_fin': '20',
-            'wasender_token': '',
-            'wasender_url': 'https://wasenderapi.com/api/send-message'
-        }
-
-        for k, v in keys.items():
-            try:
-                cursor.execute(self._fmt_query("INSERT INTO configuracion (clave, valor) VALUES (?, ?)"), (k, v))
-                conn.commit()
-            except Exception:
-                conn.rollback()
+        ''')
         
-        conn.close()
-    
-    # ==================== CONFIGURACIÓN ====================
-    
-    def get_config(self, clave, default=None):
-        conn = self.get_connection()
-        cursor = self._get_cursor(conn)
-        cursor.execute(self._fmt_query('SELECT valor FROM configuracion WHERE clave = ?'), (clave,))
-        row = cursor.fetchone()
-        conn.close()
-        # En Postgres RealDictCursor devuelve dict, en SQLite Row devuelve objeto accesible por key
-        if row:
-            return row['valor']
-        return default
-    
-    def set_config(self, clave, valor):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        # Postgres UPSERT: INSERT ... ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor
-        # SQLite UPSERT: INSERT OR REPLACE ...
-
-        if self.is_postgres:
-            cursor.execute('''
-                INSERT INTO configuracion (clave, valor) VALUES (%s, %s)
-                ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor
-            ''', (clave, valor))
-        else:
-            cursor.execute('''
-                INSERT OR REPLACE INTO configuracion (clave, valor) VALUES (?, ?)
-            ''', (clave, valor))
-
         conn.commit()
         conn.close()
-    
+        
+        # Cargar datos iniciales (Seed del Video)
+        self.migrar_datos_video()
+
+    def migrar_datos_video(self):
+        """Inserta los turnos del video si no existen"""
+        # Lista de turnos del video (Ya convertidos a 24hs)
+        turnos_video = [
+            # Viernes 19/12
+            ("Matias", "2025-12-19", "10:00"),
+            ("Dario", "2025-12-19", "13:00"),
+            ("Facundo", "2025-12-19", "17:00"),
+            ("Chocho", "2025-12-19", "19:00"),
+            # Sabado 20/12
+            ("Thiago", "2025-12-20", "08:00"),
+            ("Monyo", "2025-12-20", "09:00"),
+            ("Ale", "2025-12-20", "10:00"),
+            ("Lucas", "2025-12-20", "11:00"),
+            ("Dionisio", "2025-12-20", "12:00"),
+            ("Martin Silva", "2025-12-20", "16:00"),
+            ("Mati Aranda", "2025-12-20", "17:00"),
+            ("Elías Chávez", "2025-12-20", "18:00"),
+            ("Ian", "2025-12-20", "19:00"),
+            ("Kevin Fariña", "2025-12-20", "20:00"),
+            ("Lucas Obregón", "2025-12-20", "21:00"),
+            # Lunes 22/12
+            ("Joaquín", "2025-12-22", "09:00"),
+            ("Erick", "2025-12-22", "13:00"),
+            ("Jun", "2025-12-22", "14:00"),
+            ("Thiago Vivero", "2025-12-22", "17:00"),
+            ("Chocho", "2025-12-22", "19:00"),
+            ("Brian", "2025-12-22", "20:00"),
+            # Martes 23/12
+            ("Santiago", "2025-12-23", "15:00"),
+            ("Esteban Pesoa", "2025-12-23", "18:00"),
+            ("Noa", "2025-12-23", "21:00"),
+        ]
+
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        count_inserts = 0
+        for cliente, fecha, hora in turnos_video:
+            # Verificar si ya existe para no duplicar
+            cursor.execute("SELECT id FROM citas WHERE fecha = ? AND hora = ?", (fecha, hora))
+            data = cursor.fetchone()
+            if not data:
+                cursor.execute("INSERT INTO citas (cliente, fecha, hora, servicio) VALUES (?, ?, ?, ?)", 
+                               (cliente, fecha, hora, "Corte (Importado)"))
+                count_inserts += 1
+                
+        conn.commit()
+        conn.close()
+        if count_inserts > 0:
+            print(f"🔄 [DB] Se importaron {count_inserts} turnos del video.")
+
+    # === FUNCIONES QUE PIDE TU API_SERVER.PY ===
+
+    def get_config(self, clave, default=None):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT valor FROM config WHERE clave = ?", (clave,))
+        row = cursor.fetchone()
+        conn.close()
+        return row['valor'] if row else default
+
     def get_all_config(self):
         conn = self.get_connection()
-        cursor = self._get_cursor(conn)
-        cursor.execute('SELECT clave, valor FROM configuracion')
+        cursor = conn.cursor()
+        cursor.execute("SELECT clave, valor FROM config")
         rows = cursor.fetchall()
         conn.close()
         return {row['clave']: row['valor'] for row in rows}
-    
-    # ==================== CITAS ====================
-    
-    def agregar_cita(self, fecha, hora, cliente_nombre, telefono='', servicio='Corte', total=0):
+        
+    def set_config(self, clave, valor):
         conn = self.get_connection()
         cursor = conn.cursor()
-
-        try:
-            # 0. VALIDACIÓN ESTRICTA (Anti-Doble Turno)
-            cursor.execute(self._fmt_query('''
-                SELECT id FROM citas
-                WHERE fecha = ? AND hora = ? AND estado = 'Confirmado'
-            '''), (fecha, hora))
-            if cursor.fetchone():
-                print(f"🚫 RECHAZADO: El turno {fecha} {hora} ya está ocupado.")
-                return None
-
-            # 1. Buscar citas activas de este teléfono (Futuras o de hoy) para Reagendamiento
-            if telefono and len(telefono) > 5:
-                # Postgres date('now') no existe, es CURRENT_DATE. SQLite usa date('now').
-                # Solución: Pasar la fecha desde Python para evitar SQL dialect issues.
-                hoy_str = datetime.date.today().isoformat()
-
-                cursor.execute(self._fmt_query('''
-                    SELECT id FROM citas
-                    WHERE telefono = ?
-                    AND estado = 'Confirmado'
-                    AND fecha >= ?
-                '''), (telefono, hoy_str))
-
-                citas_activas = cursor.fetchall()
-                # fetchall devuelve lista de tuplas en cursor standard, o list of dicts en RealDictCursor?
-                # Si usamos cursor standard para inserts, devuelve tuplas.
-
-                for cita in citas_activas:
-                    # En cursor standard cita[0] es id.
-                    cid = cita[0] if isinstance(cita, tuple) else cita['id']
-                    print(f"🔄 REAGENDANDO: Cancelando cita anterior ID {cid} para {telefono}")
-                    cursor.execute(self._fmt_query("UPDATE citas SET estado = 'Cancelado' WHERE id = ?"), (cid,))
-
-            # 2. Insertar nueva cita
-            cursor.execute(self._fmt_query('''
-                INSERT INTO citas (fecha, hora, cliente_nombre, telefono, servicio, estado)
-                VALUES (?, ?, ?, ?, ?, 'Confirmado')
-            '''), (fecha, hora, cliente_nombre, telefono, servicio))
-
-            # lastrowid no siempre funciona en Postgres.
-            if self.is_postgres:
-                # En Postgres hay que usar RETURNING id
-                # Pero ya ejecutamos. Si queremos ID necesitamos cambiar query.
-                # Simplificamos: si no devuelve ID, retornamos True/Dummy ID para indicar éxito.
-                # O re-ejecutamos con RETURNING.
-                # Hack simple para compatibilidad: No necesitamos el ID exacto en la lógica actual (solo Truthy).
-                cita_id = 999
-            else:
-                cita_id = cursor.lastrowid
-
-            conn.commit()
-            return cita_id
-
-        except Exception as e:
-            conn.rollback()
-            print(f"❌ Error en agregar_cita: {e}")
-            raise e
-        finally:
-            conn.close()
-    
-    def obtener_citas_por_fecha(self, fecha):
-        conn = self.get_connection()
-        cursor = self._get_cursor(conn)
-        cursor.execute(self._fmt_query('''
-            SELECT id, fecha, hora, cliente_nombre, telefono, servicio, estado
-            FROM citas 
-            WHERE fecha = ? AND estado = 'Confirmado'
-            ORDER BY hora
-        '''), (fecha,))
-        rows = cursor.fetchall()
-        conn.close()
-        # RealDictCursor returns dict-like objects. SQLite Row returns dict-like.
-        # Ensure we return list of dicts.
-        return [dict(row) for row in rows]
-    
-    def obtener_todas_las_citas(self):
-        conn = self.get_connection()
-        cursor = self._get_cursor(conn)
-        cursor.execute(self._fmt_query('''
-            SELECT id, fecha, hora, cliente_nombre, servicio, estado
-            FROM citas 
-            WHERE estado = 'Confirmado'
-            ORDER BY fecha, hora
-        '''))
-        rows = cursor.fetchall()
-        conn.close()
-        return [dict(row) for row in rows]
-    
-    def eliminar_cita(self, cita_id):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(self._fmt_query('DELETE FROM citas WHERE id = ?'), (cita_id,))
+        cursor.execute("INSERT OR REPLACE INTO config (clave, valor) VALUES (?, ?)", (clave, valor))
         conn.commit()
         conn.close()
-    
+
+    def obtener_citas_por_fecha(self, fecha):
+        """Retorna lista de citas para verificar disponibilidad"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM citas WHERE fecha = ? AND estado = 'Confirmado'", (fecha,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    def obtener_todas_las_citas(self):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM citas ORDER BY fecha DESC, hora DESC")
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
     def contar_citas_hoy(self):
         hoy = datetime.date.today().isoformat()
         conn = self.get_connection()
-        cursor = self._get_cursor(conn)
-        cursor.execute(self._fmt_query('''
-            SELECT COUNT(*) as total FROM citas
-            WHERE fecha = ?
-            AND estado = 'Confirmado'
-        '''), (hoy,))
-        row = cursor.fetchone()
-        conn.close()
-        return row['total'] if row else 0
-    
-    # ==================== MENSAJES ====================
-    
-    def agregar_mensaje(self, cliente, contenido, es_bot=False):
-        conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute(self._fmt_query('''
-            INSERT INTO mensajes (cliente_nombre, contenido, es_bot)
-            VALUES (?, ?, ?)
-        '''), (cliente, contenido, 1 if es_bot else 0))
-        conn.commit()
+        cursor.execute("SELECT count(*) FROM citas WHERE fecha = ?", (hoy,))
+        res = cursor.fetchone()[0]
         conn.close()
-    
+        return res
+
     def contar_mensajes_hoy(self):
         hoy = datetime.date.today().isoformat()
         conn = self.get_connection()
-        cursor = self._get_cursor(conn)
-
-        # Postgres: DATE(timestamp) funciona. SQLite: DATE(timestamp) funciona.
-        cursor.execute(self._fmt_query('''
-            SELECT COUNT(*) as total FROM mensajes 
-            WHERE DATE(timestamp) = ?
-        '''), (hoy,))
-        row = cursor.fetchone()
+        cursor = conn.cursor()
+        cursor.execute("SELECT count(*) FROM mensajes WHERE date(timestamp) = ?", (hoy,))
+        res = cursor.fetchone()[0]
         conn.close()
-        return row['total'] if row else 0
+        return res
 
-    # ==================== SESIONES BOT (PERSISTENCIA) ====================
+    def agregar_mensaje(self, cliente, contenido, es_bot=False):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO mensajes (cliente_nombre, contenido, es_bot) VALUES (?, ?, ?)", 
+                       (cliente, contenido, 1 if es_bot else 0))
+        conn.commit()
+        conn.close()
 
+    def agregar_cita(self, fecha, hora, cliente_nombre, telefono, servicio):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("BEGIN TRANSACTION")
+            # Verificar disponibilidad
+            cursor.execute("SELECT count(*) FROM citas WHERE fecha = ? AND hora = ?", (fecha, hora))
+            if cursor.fetchone()[0] > 0:
+                conn.rollback()
+                return None
+            
+            cursor.execute("INSERT INTO citas (cliente, telefono, fecha, hora, servicio) VALUES (?, ?, ?, ?, ?)",
+                           (cliente_nombre, telefono, fecha, hora, servicio))
+            last_id = cursor.lastrowid
+            conn.commit()
+            return last_id
+        except Exception as e:
+            conn.rollback()
+            print(f"Error DB: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def eliminar_cita(self, cita_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM citas WHERE id = ?", (cita_id,))
+        conn.commit()
+        conn.close()
+
+    # === MANEJO DE SESIONES (MEMORIA) ===
     def get_session(self, cliente_id):
         conn = self.get_connection()
-        cursor = self._get_cursor(conn)
-
-        # 1. Recuperar Estado con Timeout (15 min)
-        # Postgres uses NOW(), SQLite uses CURRENT_TIMESTAMP or datetime('now')
-        # We will fetch updated_at and check in Python to be safe across engines
-        cursor.execute(self._fmt_query('SELECT estado_json, updated_at FROM sesiones_bot WHERE cliente_id = ?'), (cliente_id,))
+        cursor = conn.cursor()
+        
+        # 1. Obtener estado
+        cursor.execute("SELECT estado_json FROM sesiones_bot WHERE cliente_id = ?", (cliente_id,))
         row = cursor.fetchone()
+        state = json.loads(row['estado_json']) if row and row['estado_json'] else {}
 
-        state = {}
-        reset_needed = False
-
-        if row:
-            # Check timeout
-            last_update = row['updated_at']
-            if isinstance(last_update, str):
-                # SQLite usually returns string "YYYY-MM-DD HH:MM:SS"
-                try:
-                    last_update = datetime.datetime.strptime(last_update, "%Y-%m-%d %H:%M:%S")
-                except:
-                    last_update = datetime.datetime.now() # Fallback
-
-            # If postgres, it might be datetime object already
-
-            diff = datetime.datetime.now() - last_update
-            if diff.total_seconds() > 900: # 15 minutes
-                print(f"⏰ Sesión expirada para {cliente_id} (>15m). Reiniciando.")
-                reset_needed = True
-            elif row['estado_json']:
-                try:
-                    state = json.loads(row['estado_json'])
-                except:
-                    state = {}
-
-        if reset_needed:
-            # Clear state in DB
-            self.save_session_state(cliente_id, {})
-            # Return empty history implies "New Conversation" to the LLM context essentially
-            return {"state": {}, "history": []}
-
-        # 2. Recuperar Historial (Últimos 10 mensajes)
-        cursor.execute(self._fmt_query('''
-            SELECT es_bot, contenido
-            FROM mensajes
-            WHERE cliente_nombre = ?
-            ORDER BY id DESC LIMIT 10
-        '''), (cliente_id,))
+        # 2. Obtener historial reciente
+        cursor.execute("SELECT es_bot, contenido FROM mensajes WHERE cliente_nombre = ? ORDER BY id DESC LIMIT 6", (cliente_id,))
         rows = cursor.fetchall()
-
+        
         history = []
         for r in rows:
             role = "assistant" if r['es_bot'] else "user"
             history.insert(0, {"role": role, "content": r['contenido']})
-
+            
         conn.close()
         return {"state": state, "history": history}
 
     def save_session_state(self, cliente_id, state_dict):
         conn = self.get_connection()
         cursor = conn.cursor()
-        state_json = json.dumps(state_dict)
-
-        if self.is_postgres:
-            cursor.execute('''
-                INSERT INTO sesiones_bot (cliente_id, estado_json, updated_at)
-                VALUES (%s, %s, CURRENT_TIMESTAMP)
-                ON CONFLICT (cliente_id) DO UPDATE SET estado_json = EXCLUDED.estado_json, updated_at = CURRENT_TIMESTAMP
-            ''', (cliente_id, state_json))
-        else:
-            cursor.execute('''
-                INSERT OR REPLACE INTO sesiones_bot (cliente_id, estado_json, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-            ''', (cliente_id, state_json))
-
+        json_str = json.dumps(state_dict)
+        cursor.execute("INSERT OR REPLACE INTO sesiones_bot (cliente_id, estado_json) VALUES (?, ?)", (cliente_id, json_str))
         conn.commit()
         conn.close()
 
-# Instancia global
+# INSTANCIA GLOBAL (Importante para api_server.py)
 db = Database()
-
-# Helpers retrocompatibles
-def inicializar_agenda(): pass
-def obtener_horarios_disponibles(fecha): return db.obtener_horarios_disponibles(fecha)
-def agendar_cita(fecha, hora, cliente, telefono): return db.agendar_cita(fecha, hora, cliente, telefono)
-def cancelar_cita(fecha, cliente): return db.cancelar_cita(fecha, cliente)

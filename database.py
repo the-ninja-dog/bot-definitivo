@@ -5,7 +5,7 @@ import os
 import time
 
 # Nombre de la DB
-DB_NAME = "barberia.db"
+DB_NAME = "agenda_final_2025.db"
 
 class Database:
     def __init__(self):

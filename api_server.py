@@ -470,8 +470,11 @@ HORARIO OFICIAL: 09:00 AM a 20:00 PM. (Almuerzo 12:00 - 13:00 CERRADO)
             db.save_session_state(cliente, nuevo_estado)
             
             # Limpiar bloque de memoria de la respuesta al usuario
-            # Limpieza NUCLEAR: Eliminar todo desde [MEMORIA] hasta el final
-            respuesta_visible = re.sub(r'\[MEMORIA\].*', '', respuesta, flags=re.DOTALL).strip()
+            # Limpieza NUCLEAR V2: Split string (Más robusto que Regex)
+            if '[MEMORIA]' in respuesta:
+                respuesta_visible = respuesta.split('[MEMORIA]')[0].strip()
+            else:
+                respuesta_visible = respuesta.strip()
 
             if '[CITA]' in respuesta_visible and '[/CITA]' in respuesta_visible:
                 # Extraer datos de cita antes de limpiar
